@@ -116,10 +116,16 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
       if (!existing.models.mode) existing.models.mode = "merge";
       existing.models.providers["platform-proxy"] = openclawConfig.models.providers["platform-proxy"];
 
-      // --- agents: set default model to platform-proxy ---
+      // --- agents: seed default model only when the user has not configured one ---
       if (!existing.agents) existing.agents = {};
       if (!existing.agents.defaults) existing.agents.defaults = {};
-      existing.agents.defaults.model = openclawConfig.agents.defaults.model;
+      const existingDefaultModel =
+        typeof existing.agents.defaults.model === "string"
+          ? existing.agents.defaults.model.trim()
+          : "";
+      if (!existingDefaultModel) {
+        existing.agents.defaults.model = openclawConfig.agents.defaults.model;
+      }
 
       // --- agents.defaults.models: ensure platform-proxy model is in the allowlist ---
       // If models map exists (whitelist mode), add our platform-proxy model so it's allowed.
@@ -131,10 +137,10 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
         }
       }
 
-      // --- agents.list: rewrite per-agent model overrides to use platform-proxy ---
+      // --- agents.list: keep user-selected per-agent models; only seed missing values ---
       if (Array.isArray(existing.agents.list)) {
         for (const agent of existing.agents.list) {
-          if (agent.model && !agent.model.startsWith("platform-proxy/")) {
+          if (!agent.model || !String(agent.model).trim()) {
             agent.model = proxyModel;
           }
         }
