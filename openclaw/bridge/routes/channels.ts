@@ -51,7 +51,7 @@ export function channelsRoutes(client: BridgeGatewayClient, config: BridgeConfig
   // GET /api/channels/configured — list channel types that have config in openclaw.json
   router.get("/channels/configured", asyncHandler(async (_req, res) => {
     try {
-      const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+      const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
       const configPath = path.join(openclawHome, "openclaw.json");
       const configured: string[] = [];
 
@@ -80,7 +80,7 @@ export function channelsRoutes(client: BridgeGatewayClient, config: BridgeConfig
     const { channelType } = req.params;
     const channelConfig = req.body;
 
-    const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
     const configPath = path.join(openclawHome, "openclaw.json");
 
     let cfg: Record<string, unknown> = {};
@@ -104,7 +104,7 @@ export function channelsRoutes(client: BridgeGatewayClient, config: BridgeConfig
   router.get("/channels/:channelType/config", asyncHandler(async (req, res) => {
     const { channelType } = req.params;
 
-    const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
     const configPath = path.join(openclawHome, "openclaw.json");
 
     if (!fs.existsSync(configPath)) {
@@ -125,7 +125,7 @@ export function channelsRoutes(client: BridgeGatewayClient, config: BridgeConfig
   router.delete("/channels/:channelType/config", asyncHandler(async (req, res) => {
     const { channelType } = req.params;
 
-    const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
     const configPath = path.join(openclawHome, "openclaw.json");
 
     if (!fs.existsSync(configPath)) {

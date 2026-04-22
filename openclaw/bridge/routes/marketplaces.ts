@@ -235,8 +235,7 @@ function loadRecommendedSkills(repoDir: string): RecommendedCategory[] {
   const results: RecommendedCategory[] = [];
 
   for (const cat of catData.categories) {
-    // Skip "existing" category (built-in skills from claude-plugins)
-    if (cat.id === "existing") continue;
+    // "exclusive" category uses path: "claude-plugins" under skills/
 
     const catDir = path.join(skillsDir, cat.path || cat.id);
     if (!fs.existsSync(catDir)) continue;
@@ -592,7 +591,17 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
     const safeName = String(skillName).replace(/[^a-zA-Z0-9_\-]/g, "");
 
     const repoDir = cloneOrPullRecommended(_config.skillsMarketplaceRepo);
-    const sourcePath = path.join(repoDir, "skills", safeCat, safeName);
+
+    // Resolve category directory: use "path" field from categories.json if defined
+    let catDir = safeCat;
+    const catFile = path.join(repoDir, "skills", "categories.json");
+    try {
+      const catData = JSON.parse(fs.readFileSync(catFile, "utf-8"));
+      const catMeta = catData.categories?.find((c: CategoryMeta) => c.id === safeCat);
+      if (catMeta?.path) catDir = catMeta.path;
+    } catch { /* use safeCat as fallback */ }
+
+    const sourcePath = path.join(repoDir, "skills", catDir, safeName);
 
     if (!fs.existsSync(sourcePath) || !fs.existsSync(path.join(sourcePath, "SKILL.md"))) {
       res.status(404).json({ detail: `Skill "${safeName}" not found in category "${safeCat}"` });

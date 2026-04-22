@@ -192,6 +192,59 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
     }
   }));
 
+  // POST /api/runs/:runId/abort — 终止某个特定对话的逻辑
+  router.post("/sessions/:key(*)/abort-active", asyncHandler(async (req, res) => {
+    const sessionKey = toOpenclawSessionKey(req.params.key);
+    if (!sessionKey) {
+      res.status(400).json({ detail: "sessionKey is required" });
+      return;
+    }
+
+    try {
+      const result = await client.request<Record<string, unknown>>("chat.abort", {
+        sessionKey,
+      });
+      const runIds = Array.isArray(result.runIds) ? result.runIds.map(item => String(item)) : [];
+      res.json({
+        ok: true,
+        aborted: Boolean(result.aborted),
+        runIds,
+      });
+    } catch (err) {
+      res.status(500).json({ detail: (err as Error).message });
+    }
+  }));
+
+  router.post("/runs/:runId/abort", asyncHandler(async (req, res) => {
+    const runId = String(req.params.runId || "").trim();
+    const rawSessionKey = String(req.body?.sessionKey || "").trim();
+    const sessionKey = rawSessionKey ? toOpenclawSessionKey(rawSessionKey) : "";
+
+    if (!runId) {
+      res.status(400).json({ detail: "runId is required" });
+      return;
+    }
+    if (!sessionKey) {
+      res.status(400).json({ detail: "sessionKey is required" });
+      return;
+    }
+
+    try {
+      const result = await client.request<Record<string, unknown>>("chat.abort", {
+        sessionKey,
+        runId,
+      });
+      const runIds = Array.isArray(result.runIds) ? result.runIds.map(item => String(item)) : [];
+      res.json({
+        ok: true,
+        aborted: Boolean(result.aborted),
+        runIds,
+      });
+    } catch (err) {
+      res.status(500).json({ detail: (err as Error).message });
+    }
+  }));
+
   // DELETE /api/sessions/:key — delete session
   router.delete("/sessions/:key(*)", asyncHandler(async (req, res) => {
     const key = toOpenclawSessionKey(req.params.key);

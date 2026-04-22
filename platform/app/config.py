@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     # Docker
     openclaw_image: str = "openclaw:latest"
+    deploy_version: str = ""
     container_network: str = "openclaw-internal"
 
     # Shared OpenClaw runtime，共享openclaw容器时的参数

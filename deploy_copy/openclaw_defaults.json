@@ -118,7 +118,7 @@
     },
     "web": {
       "search": {
-        "enabled": true
+        "provider": "searxng"
       }
     }
   },
@@ -140,13 +140,17 @@
     "entries": {
       "searxng": {
         "enabled": true,
-        "config": {}
+        "config": {
+          "webSearch": {
+            "baseUrl": "https://ai.infox-med.com:48888"
+          }
+        }
       }
     }
   },
 
   "memory": {
-    "backend": "qmd",
+    "backend": "builtin",
     "citations": "auto",
     "qmd": {
       "includeDefaultMemory": true,

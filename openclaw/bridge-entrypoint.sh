@@ -4,28 +4,74 @@ set -e
 HOME="${HOME:-/root}"
 export HOME
 
-OPENCLAW_HOME="${OPENCLAW_HOME:-/root/.openclaw}"
+# OPENCLAW_HOME 是 openclaw 内部的 "home" 基准目录，内部代码会在其下拼接 .openclaw/
+# 所以 OPENCLAW_HOME 应该指向 /root（而非 /root/.openclaw），
+# 否则 resolveDefaultAgentWorkspaceDir() 会生成 /root/.openclaw/.openclaw/workspace
+OPENCLAW_HOME="${OPENCLAW_HOME:-/root}"
 export OPENCLAW_HOME
-OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+
+# STATE_DIR 和 CONFIG_PATH 直接指向 .openclaw 目录，这些变量被 resolveConfigDir() 优先使用
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/root/.openclaw}"
 export OPENCLAW_STATE_DIR
-OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$OPENCLAW_HOME/openclaw.json}"
+OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-/root/.openclaw/openclaw.json}"
 export OPENCLAW_CONFIG_PATH
+OPENCLAW_VERSION_FILE="${OPENCLAW_STATE_DIR}/version.txt"
+export OPENCLAW_VERSION_FILE
+
+TARGET_DEPLOY_VERSION="${DEPLOY_VERSION:-}"
+CURRENT_DEPLOY_VERSION="$(cat "$OPENCLAW_VERSION_FILE" 2>/dev/null || true)"
+FORCE_DEPLOY_SYNC=0
+
+if [ -n "$TARGET_DEPLOY_VERSION" ]; then
+  if [ "$CURRENT_DEPLOY_VERSION" != "$TARGET_DEPLOY_VERSION" ]; then
+    FORCE_DEPLOY_SYNC=1
+    echo "[entrypoint] Deploy version mismatch: current='${CURRENT_DEPLOY_VERSION:-<none>}' target='$TARGET_DEPLOY_VERSION'"
+  else
+    echo "[entrypoint] Deploy version unchanged: $TARGET_DEPLOY_VERSION"
+  fi
+else
+  echo "[entrypoint] DEPLOY_VERSION not set, using missing-only sync mode"
+fi
+
+copy_deploy_file() {
+  src="$1"
+  dst="$2"
+  label="$3"
+
+  if [ "$FORCE_DEPLOY_SYNC" = "1" ] || [ ! -f "$dst" ]; then
+    parent="$(dirname "$dst")"
+    if [ -f "$parent" ]; then
+      rm -rf "$parent"
+    fi
+    mkdir -p "$parent"
+    cp "$src" "$dst"
+    if [ "$FORCE_DEPLOY_SYNC" = "1" ]; then
+      echo "[entrypoint]   = $label (forced)"
+    else
+      echo "[entrypoint]   + $label"
+    fi
+  fi
+}
 
 # 快速创建必需目录（并行执行以提高速度）
-mkdir -p "$OPENCLAW_HOME"/{workspace,uploads,sessions,skills,extensions,agents,memory/{weekly,archive}}
+mkdir -p "$OPENCLAW_STATE_DIR"/{workspace,uploads,sessions,skills,extensions,agents,memory/{weekly,archive}}
 
 # 快速清理 Chromium 锁文件（优化：使用 -delete 标志）
-find "$OPENCLAW_HOME/browser" -type f \( -name "SingletonLock" -o -name "SingletonCookie" -o -name "SingletonSocket" \) -delete 2>/dev/null || true
+find "$OPENCLAW_STATE_DIR/browser" -type f \( -name "SingletonLock" -o -name "SingletonCookie" -o -name "SingletonSocket" \) -delete 2>/dev/null || true
 
 # 如果不存在默认 openclaw.json 文件，初始化一个空的
-if [ ! -f "$OPENCLAW_HOME/openclaw.json" ]; then
-  echo "{}" > "$OPENCLAW_HOME/openclaw.json"
-  echo "[entrypoint] Initialized $OPENCLAW_HOME/openclaw.json"
+if [ ! -f "$OPENCLAW_STATE_DIR/openclaw.json" ]; then
+  echo "{}" > "$OPENCLAW_STATE_DIR/openclaw.json"
+  echo "[entrypoint] Initialized $OPENCLAW_STATE_DIR/openclaw.json"
 fi
 
 # 同步需要预先拷贝的配置，skills和agents到容器
 if [ -d /deploy-copy ]; then
-  echo "[entrypoint] Syncing deploy templates..."
+  if [ "$FORCE_DEPLOY_SYNC" = "1" ]; then
+    echo "[entrypoint]  强制同步deploy模版到本容器.."
+  else
+    echo "[entrypoint] 仅仅同步缺失的部分deploy模版到本容器..."
+  fi
 
   # Sync Agents — each subdirectory becomes a registered agent
   if [ -d /deploy-copy/Agents ]; then
@@ -35,13 +81,13 @@ if [ -d /deploy-copy ]; then
       agent_id="$(echo "$agent_name" | tr '[:upper:]' '[:lower:]')"
 
       # 1. Create agents/<id>/ directory (for gateway disk discovery)
-      mkdir -p "$OPENCLAW_HOME/agents/$agent_id"
+      mkdir -p "$OPENCLAW_STATE_DIR/agents/$agent_id"
 
       # 2. Sync workspace files — main uses workspace/, others use workspace-<id>/
       if [ "$agent_id" = "main" ]; then
-        workspace_dir="$OPENCLAW_HOME/workspace"
+        workspace_dir="$OPENCLAW_STATE_DIR/workspace"
       else
-        workspace_dir="$OPENCLAW_HOME/workspace-$agent_id"
+        workspace_dir="$OPENCLAW_STATE_DIR/workspace-$agent_id"
       fi
       mkdir -p "$workspace_dir"
       find "$agent_src" -type f | while read src; do
@@ -49,17 +95,21 @@ if [ -d /deploy-copy ]; then
         dst="$workspace_dir/$rel"
         mkdir -p "$(dirname "$dst")"
         base="$(basename "$rel")"
-        # Platform-managed files (SOUL.md, AGENTS.md, IDENTITY.md) are always overwritten
-        # User files (USER.md, memory/, MEMORY.md) are only created if missing
+        # Platform-managed files are always overwritten.
+        # Other files are only overwritten during an explicit deploy-version upgrade.
         case "$base" in
           SOUL.md|AGENTS.md|IDENTITY.md)
             cp "$src" "$dst"
             echo "[entrypoint]   = workspace-$agent_id/$rel (updated)"
             ;;
           *)
-            if [ ! -f "$dst" ]; then
+            if [ "$FORCE_DEPLOY_SYNC" = "1" ] || [ ! -f "$dst" ]; then
               cp "$src" "$dst"
-              echo "[entrypoint]   + workspace-$agent_id/$rel"
+              if [ "$FORCE_DEPLOY_SYNC" = "1" ]; then
+                echo "[entrypoint]   = workspace-$agent_id/$rel (forced)"
+              else
+                echo "[entrypoint]   + workspace-$agent_id/$rel"
+              fi
             fi
             ;;
         esac
@@ -72,17 +122,11 @@ if [ -d /deploy-copy ]; then
 
   # Sync extensions (openclaw plugins)
   if [ -d /deploy-copy/extensions ]; then
-    mkdir -p "$OPENCLAW_HOME/extensions"
+    mkdir -p "$OPENCLAW_STATE_DIR/extensions"
     find /deploy-copy/extensions -type f | while read src; do
       rel="${src#/deploy-copy/extensions/}"
-      dst="$OPENCLAW_HOME/extensions/$rel"
-      if [ ! -f "$dst" ]; then
-        parent="$(dirname "$dst")"
-        if [ -f "$parent" ]; then rm -rf "$parent"; fi
-        mkdir -p "$parent"
-        cp "$src" "$dst"
-        echo "[entrypoint]   + extensions/$rel"
-      fi
+      dst="$OPENCLAW_STATE_DIR/extensions/$rel"
+      copy_deploy_file "$src" "$dst" "extensions/$rel"
     done
   fi
 
@@ -90,14 +134,8 @@ if [ -d /deploy-copy ]; then
   if [ -d /deploy-copy/skills ]; then
     find /deploy-copy/skills -type f | while read src; do
       rel="${src#/deploy-copy/skills/}"
-      dst="$OPENCLAW_HOME/skills/$rel"
-      if [ ! -f "$dst" ]; then
-        parent="$(dirname "$dst")"
-        if [ -f "$parent" ]; then rm -rf "$parent"; fi
-        mkdir -p "$parent"
-        cp "$src" "$dst"
-        echo "[entrypoint]   + skills/$rel"
-      fi
+      dst="$OPENCLAW_STATE_DIR/skills/$rel"
+      copy_deploy_file "$src" "$dst" "skills/$rel"
     done
   fi
 
@@ -107,7 +145,7 @@ if [ -d /deploy-copy ]; then
       node -e "
         const fs = require('fs');
         const defaultsPath = '/deploy-copy/openclaw_defaults.json';
-        const configPath = '$OPENCLAW_HOME/openclaw.json';
+        const configPath = '$OPENCLAW_STATE_DIR/openclaw.json';
         const defaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf-8'));
 
         // If config doesn't exist, just copy defaults
@@ -190,11 +228,11 @@ if [ -d /deploy-copy ]; then
   fi
 
   # Ensure all default agents exist in openclaw.json, deduplicate, fix workspace paths
-  if [ -f "$OPENCLAW_HOME/openclaw.json" ] && command -v node &> /dev/null; then
+  if [ -f "$OPENCLAW_STATE_DIR/openclaw.json" ] && command -v node &> /dev/null; then
     node -e "
       const fs = require('fs');
-      const configPath = '$OPENCLAW_HOME/openclaw.json';
-      const openclawHome = '$OPENCLAW_HOME';
+      const configPath = '$OPENCLAW_STATE_DIR/openclaw.json';
+      const openclawHome = '$OPENCLAW_STATE_DIR';
       const defaultsPath = '/deploy-copy/openclaw_defaults.json';
 
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -278,14 +316,14 @@ if [ -d /deploy-copy ]; then
 
   # Sync qmd-runner.sh wrapper script
   if [ -f /deploy-copy/qmd-runner.sh ]; then
-    sed 's/\r$//' /deploy-copy/qmd-runner.sh > "$OPENCLAW_HOME/qmd-runner.sh"
-    chmod +x "$OPENCLAW_HOME/qmd-runner.sh"
+    sed 's/\r$//' /deploy-copy/qmd-runner.sh > "$OPENCLAW_STATE_DIR/qmd-runner.sh"
+    chmod +x "$OPENCLAW_STATE_DIR/qmd-runner.sh"
     echo "[entrypoint] qmd-runner.sh synced"
   fi
 
   # Create MEMORY.md if it doesn't exist
-  if [ ! -f "$OPENCLAW_HOME/memory/MEMORY.md" ]; then
-    cat > "$OPENCLAW_HOME/memory/MEMORY.md" << 'MEMEOF'
+  if [ ! -f "$OPENCLAW_STATE_DIR/memory/MEMORY.md" ]; then
+    cat > "$OPENCLAW_STATE_DIR/memory/MEMORY.md" << 'MEMEOF'
 # Long-Term Memory
 
 > Only write info here that you'd make mistakes without. Event logs stay in daily files.
@@ -304,7 +342,7 @@ MEMEOF
 
   # Initialize qmd memory collection (BM25 search mode, no embedding needed)
   if command -v qmd >/dev/null 2>&1; then
-    qmd collection add "$OPENCLAW_HOME/memory" 2>/dev/null || true
+    qmd collection add "$OPENCLAW_STATE_DIR/memory" 2>/dev/null || true
     qmd update 2>/dev/null || true
     echo "[entrypoint] qmd memory collection initialized"
   else
@@ -312,6 +350,11 @@ MEMEOF
   fi
 
   echo "[entrypoint] Deploy templates synced"
+
+  if [ -n "$TARGET_DEPLOY_VERSION" ]; then
+    printf '%s\n' "$TARGET_DEPLOY_VERSION" > "$OPENCLAW_VERSION_FILE"
+    echo "[entrypoint] 记录部署版本 deploy version: $TARGET_DEPLOY_VERSION"
+  fi
 fi
 
 # If NANOBOT_PROXY__URL is set, we're running in platform mode
@@ -336,7 +379,7 @@ _register_memory_crons() {
   done
 
   # 幂等：检查是否已经注册过
-  if [ -f "$OPENCLAW_HOME/.crons-registered" ]; then
+  if [ -f "$OPENCLAW_STATE_DIR/.crons-registered" ]; then
     echo "[entrypoint] crons already registered, skipping"
     return
   fi
@@ -368,7 +411,7 @@ _register_memory_crons() {
   fi
 
   # 标记 cron 已注册
-  touch "$OPENCLAW_HOME/.crons-registered"
+  touch "$OPENCLAW_STATE_DIR/.crons-registered"
 }
 
 # 异步执行，不阻塞主进程启动

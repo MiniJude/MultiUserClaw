@@ -45,11 +45,18 @@ export function buildGatewayEnv(
   env: Record<string, string | undefined>,
   config: BridgeStartupConfigLike,
 ): Record<string, string | undefined> {
-  return {
+  const result: Record<string, string | undefined> = {
     ...env,
     OPENCLAW_CONFIG_PATH: path.join(config.openclawHome, "openclaw.json"),
     OPENCLAW_STATE_DIR: config.openclawHome,
   };
+  // BRIDGE_ENABLE_CHANNELS=1 means channels should be active.
+  // The Docker image sets OPENCLAW_SKIP_CHANNELS=1 for faster startup,
+  // so we explicitly remove it when channels are requested.
+  if (env.BRIDGE_ENABLE_CHANNELS === "1") {
+    delete result.OPENCLAW_SKIP_CHANNELS;
+  }
+  return result;
 }
 
 export function formatStartupStartedAt(startedAt: Date): string {

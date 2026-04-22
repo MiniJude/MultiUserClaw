@@ -41,6 +41,11 @@ RUN --mount=type=cache,id=openclaw-bridge-apt-cache,target=/var/cache/apt,sharin
         fonts-noto-color-emoji \
         fontconfig \
         locales \
+        texlive-latex-base \
+        texlive-latex-extra \
+        texlive-fonts-recommended \
+        texlive-xetex \
+        texlive-lang-chinese \
     && \
     sed -i 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen zh_CN.UTF-8 && \

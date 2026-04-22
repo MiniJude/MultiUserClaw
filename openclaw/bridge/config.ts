@@ -35,7 +35,7 @@ export function loadConfig(): BridgeConfig {
   const modelInput = parseModelInput(process.env.NANOBOT_PROXY__MODEL_INPUT);
   const gatewayPort = parseInt(process.env.OPENCLAW_GATEWAY_PORT || "18789", 10);
   const bridgePort = parseInt(process.env.BRIDGE_PORT || "18080", 10);
-  const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
   const workspacePath = process.env.OPENCLAW_WORKSPACE || path.join(openclawHome, "workspace");
   const uploadsPath = path.join(openclawHome, "uploads");
   const sessionsPath = path.join(openclawHome, "sessions");
@@ -116,10 +116,16 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
       if (!existing.models.mode) existing.models.mode = "merge";
       existing.models.providers["platform-proxy"] = openclawConfig.models.providers["platform-proxy"];
 
-      // --- agents: set default model to platform-proxy ---
+    // --- agents：将默认模型设置为 platform-proxy ---
+    // 保留用户已经通过 UI 选择的模型；仅当尚未配置模型时，
+    // 才写入从环境变量派生的默认值。
+    // 用户选择的模型会直接保存到 openclaw.json（而不是环境变量），
+    // 因此 loadConfig() 无法读取到这些值 —— 在这里始终进行写保护是安全的。
       if (!existing.agents) existing.agents = {};
       if (!existing.agents.defaults) existing.agents.defaults = {};
-      existing.agents.defaults.model = openclawConfig.agents.defaults.model;
+      if (!existing.agents.defaults.model) {
+        existing.agents.defaults.model = openclawConfig.agents.defaults.model;
+      }
 
       // --- agents.defaults.models: ensure platform-proxy model is in the allowlist ---
       // If models map exists (whitelist mode), add our platform-proxy model so it's allowed.

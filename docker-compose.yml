@@ -64,6 +64,7 @@ services:
 
       PLATFORM_DEFAULT_MODEL: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
       PLATFORM_OPENCLAW_IMAGE: openclaw:latest
+      PLATFORM_DEPLOY_VERSION: ${DEPLOY_VERSION:-}
       PLATFORM_CONTAINER_NETWORK: openclaw-internal
       PLATFORM_SHARED_OPENCLAW_ENABLED: ${PLATFORM_SHARED_OPENCLAW_ENABLED:-true}
       PLATFORM_SHARED_OPENCLAW_URL: ${PLATFORM_SHARED_OPENCLAW_URL:-http://shared-openclaw:18080}
@@ -103,6 +104,7 @@ services:
       NANOBOT_PROXY__URL: http://gateway:8080/llm/v1
       NANOBOT_PROXY__TOKEN: ${PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN:-shared-openclaw-system-token}
       NANOBOT_AGENTS__DEFAULTS__MODEL: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
+      DEPLOY_VERSION: ${DEPLOY_VERSION:-}
       TZ: ${CONTAINER_TZ:-Asia/Shanghai}
       BRIDGE_ENABLE_CHANNELS: "0"
     volumes:

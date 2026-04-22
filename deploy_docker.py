@@ -430,11 +430,6 @@ def main():
                 run(f"docker rm -f {container_ids}", check=False)
                 success("旧用户容器已清理")
 
-            # 清理 DB 中的容器记录，注释掉，不要删除数据库中的记录了
-            # log("清理数据库容器记录...")
-            # run('docker exec openclaw-postgres psql -U nanobot -d nanobot_platform -c "DELETE FROM containers;"', check=False)
-            # success("数据库容器记录已清理")
-
         # 设置 VITE_API_URL（frontend 构建需要）
         if args.host and args.gateway_port:
             api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)

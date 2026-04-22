@@ -266,6 +266,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
         "NANOBOT_PROXY__TOKEN": container_token,
         "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
+        "DEPLOY_VERSION": settings.deploy_version,
         "TZ": settings.container_tz,
         "BRIDGE_ENABLE_CHANNELS": "1",
     }

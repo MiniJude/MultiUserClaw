@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Folder,
   FileText,
@@ -10,6 +10,8 @@ import {
   FolderPlus,
   Home,
   ChevronRight,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react'
 import {
   browseFiles,
@@ -30,6 +32,8 @@ export default function FileManager() {
   const [newFolderName, setNewFolderName] = useState('')
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [sortKey, setSortKey] = useState<'name' | 'size' | 'modified'>('name')
+  const [sortAsc, setSortAsc] = useState(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadDir = async (dirPath: string) => {
@@ -158,6 +162,45 @@ export default function FileManager() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   }
 
+  const handleSort = (key: 'name' | 'size' | 'modified') => {
+    if (sortKey === key) {
+      setSortAsc(!sortAsc)
+    } else {
+      setSortKey(key)
+      setSortAsc(key === 'name') // 名称默认升序，大小和时间默认降序
+    }
+  }
+
+  const sortedItems = useMemo(() => {
+    if (!data?.items) return []
+    const items = [...data.items]
+    // 文件夹始终排在前面
+    items.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+      let cmp = 0
+      switch (sortKey) {
+        case 'name':
+          cmp = a.name.localeCompare(b.name)
+          break
+        case 'size':
+          cmp = (a.size ?? 0) - (b.size ?? 0)
+          break
+        case 'modified':
+          cmp = new Date(a.modified).getTime() - new Date(b.modified).getTime()
+          break
+      }
+      return sortAsc ? cmp : -cmp
+    })
+    return items
+  }, [data?.items, sortKey, sortAsc])
+
+  const SortIcon = ({ column }: { column: 'name' | 'size' | 'modified' }) => {
+    if (sortKey !== column) return null
+    return sortAsc
+      ? <ArrowUp size={12} className="inline ml-1" />
+      : <ArrowDown size={12} className="inline ml-1" />
+  }
+
   const isTextFile = (entry: FileEntry) => {
     const ct = entry.content_type || ''
     const ext = entry.name.split('.').pop()?.toLowerCase() || ''
@@ -277,16 +320,22 @@ export default function FileManager() {
       ) : (
         <div className="rounded-xl border border-dark-border bg-dark-card overflow-hidden">
           {/* Table header */}
-          <div className="grid grid-cols-[1fr_100px_160px_100px] gap-2 border-b border-dark-border bg-dark-bg px-4 py-2 text-xs font-medium text-dark-text-secondary">
-            <span>名称</span>
-            <span className="text-right">大小</span>
-            <span className="text-right">修改时间</span>
+          <div className="grid grid-cols-[1fr_100px_160px_100px] gap-2 border-b border-dark-border bg-dark-bg px-4 py-2 text-xs font-medium text-dark-text-secondary select-none">
+            <button onClick={() => handleSort('name')} className="text-left hover:text-dark-text transition-colors">
+              名称<SortIcon column="name" />
+            </button>
+            <button onClick={() => handleSort('size')} className="text-right hover:text-dark-text transition-colors">
+              大小<SortIcon column="size" />
+            </button>
+            <button onClick={() => handleSort('modified')} className="text-right hover:text-dark-text transition-colors">
+              修改时间<SortIcon column="modified" />
+            </button>
             <span className="text-right">操作</span>
           </div>
 
-          {data?.items && data.items.length > 0 ? (
+          {sortedItems.length > 0 ? (
             <div>
-              {data.items.map(entry => {
+              {sortedItems.map(entry => {
                 const isDir = entry.type === 'directory'
                 const isDeleting = deleting === entry.path
                 const isPreviewing = previewFile?.name === entry.name

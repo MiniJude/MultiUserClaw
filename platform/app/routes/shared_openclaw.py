@@ -207,6 +207,31 @@ async def delete_shared_session(
     return await shared_runtime_request("DELETE", f"/api/sessions/{key}")
 
 
+@router.post("/runs/{run_id}/abort")
+async def abort_shared_run(
+    run_id: str,
+    session_key: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Abort a specific run (stop model inference)."""
+    await ensure_shared_agent_binding(db, user)
+    payload = {"sessionKey": session_key} if session_key else {}
+    return await shared_runtime_request("POST", f"/api/runs/{run_id}/abort", json=payload)
+
+
+@router.post("/sessions/{session_key:path}/abort-active")
+async def abort_active_shared_session_run(
+    session_key: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Abort the active run in a session."""
+    ctx = await ensure_shared_agent_binding(db, user)
+    key = ensure_session_owned(ctx, session_key)
+    return await shared_runtime_request("POST", f"/api/sessions/{key}/abort-active")
+
+
 @router.post("/files/upload")
 async def upload_shared_file(
     file: UploadFile = File(...),

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { Router } from "express";
 import type { BridgeGatewayClient } from "../gateway-client.js";
 import type { BridgeConfig } from "../config.js";
@@ -18,7 +21,13 @@ export function statusRoutes(client: BridgeGatewayClient, config: BridgeConfig):
       config_exists: true,
       workspace: config.workspacePath,
       workspace_exists: true,
-      model: config.model,
+      model: (() => {
+        try {
+          const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
+          const cfg = JSON.parse(fs.readFileSync(path.join(openclawHome, "openclaw.json"), "utf-8"));
+          return cfg?.agents?.defaults?.model || config.model;
+        } catch { return config.model; }
+      })(),
       max_tokens: 8192,
       temperature: 0.7,
       max_tool_iterations: 10,

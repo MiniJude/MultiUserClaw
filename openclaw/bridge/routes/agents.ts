@@ -75,7 +75,7 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
         // Gateway only knows about agents in openclaw.json config, but agents
         // can also be discovered from disk (workspace-<id> directories).
         // If the gateway says "not found", try to clean up the disk-only agent.
-        const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+        const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
         const workspaceDir = path.join(openclawHome, `workspace-${agentId}`);
         const agentDir = path.join(openclawHome, "agents", agentId);
         let cleaned = false;
@@ -167,7 +167,7 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
       );
 
       // Read openclaw.json to find the configured/default model
-      const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+      const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
       const configPath = path.join(openclawHome, "openclaw.json");
       let configuredModel = "";
       let configuredProviders: Record<string, unknown> = {};
@@ -194,7 +194,7 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
   router.put("/models/config", asyncHandler(async (req, res) => {
     const { providers, defaultModel } = req.body;
 
-    const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const openclawHome = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
     const configPath = path.join(openclawHome, "openclaw.json");
 
     let cfg: Record<string, unknown> = {};

@@ -34,6 +34,52 @@ async def _container_url(db: AsyncSession, user: User) -> str:
     return f"http://{container.internal_host}:{container.internal_port}"
 
 
+async def _container_api_request(
+    db: AsyncSession,
+    user: User,
+    method: str,
+    path: str,
+    *,
+    json: dict | None = None,
+    timeout: float = 30.0,
+) -> object:
+    """Send a direct API request to the user's dedicated OpenClaw runtime."""
+    base_url = await _container_url(db, user)
+    await db.close()
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method=method,
+                url=f"{base_url}{path}",
+                json=json,
+            )
+    except httpx.ConnectError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OpenClaw container is starting up, please retry in a few seconds",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"OpenClaw request failed: {exc}",
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text
+
+    if response.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=detail or "OpenClaw request failed",
+        )
+
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Container info & maintenance (must be before the catch-all route)
 # ---------------------------------------------------------------------------
@@ -228,6 +274,54 @@ async def container_doctor_fix(
 
 
 # ---------------------------------------------------------------------------
+# Abort endpoints (must be before the catch-all route)
+# These endpoints handle stopping an active model run/session
+# ---------------------------------------------------------------------------
+
+@router.post("/runs/{run_id}/abort")
+async def abort_run(
+    run_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Abort a specific agent run (stop model inference)."""
+    import json as _json
+    body = await request.body()
+    try:
+        parsed = _json.loads(body) if body else {}
+        session_key = parsed.get("sessionKey") or parsed.get("session_key")
+    except (_json.JSONDecodeError, AttributeError):
+        session_key = None
+
+    logger.info("[abort_run] User %s requested abort for run %s, session: %s", user.id, run_id, session_key)
+    payload = {"sessionKey": session_key} if session_key else {}
+    return await _container_api_request(
+        db,
+        user,
+        "POST",
+        f"/api/runs/{run_id}/abort",
+        json=payload,
+    )
+
+
+@router.post("/sessions/{session_key}/abort-active")
+async def abort_active_session_run(
+    session_key: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Abort the currently active run in a session."""
+    logger.info("[abort_active] User %s requested abort for session %s", user.id, session_key)
+    return await _container_api_request(
+        db,
+        user,
+        "POST",
+        f"/api/sessions/{session_key}/abort-active",
+    )
+
+
+# ---------------------------------------------------------------------------
 # SSE event stream (must be before the catch-all route)
 # ---------------------------------------------------------------------------
 
@@ -344,7 +438,37 @@ async def proxy_http(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Forward HTTP requests to the user's openclaw container."""
+    """Forward HTTP requests to the user's openclaw container or shared runtime."""
+    from fastapi.responses import Response, JSONResponse
+    import json as _json
+
+    # For shared mode users, redirect to /api/shared-openclaw endpoint
+    if user.runtime_mode == "shared":
+        from app.shared_runtime import shared_runtime_request, ensure_shared_agent_binding
+        ctx = await ensure_shared_agent_binding(db, user)
+
+        body = await request.body()
+        json_body = None
+        if body:
+            try:
+                json_body = _json.loads(body)
+            except _json.JSONDecodeError:
+                pass
+
+        # Build params dict from query string
+        params = dict(request.query_params) if request.query_params else None
+
+        # Forward to shared runtime
+        result = await shared_runtime_request(
+            method=request.method,
+            path=f"/api/{path}",
+            json=json_body,
+            params=params,
+            timeout=120,
+        )
+        return JSONResponse(content=result if isinstance(result, dict) else {"data": result})
+
+    # For non-shared mode, use regular container routing
     base_url = await _container_url(db, user)
     # Close the session explicitly so the connection returns to the pool
     # before the potentially long upstream call (up to 120s).
@@ -372,7 +496,6 @@ async def proxy_http(
                 detail="OpenClaw container is starting up, please retry in a few seconds",
             )
 
-    from fastapi.responses import Response
     return Response(
         content=resp.content,
         status_code=resp.status_code,

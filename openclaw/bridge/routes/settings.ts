@@ -92,7 +92,7 @@ export function settingsRoutes(config: BridgeConfig, manager?: GatewayRestartabl
               reject(new Error(errorLines.join("\n") || output));
               return;
             }
-            if (err) {
+            if (err && err.code !== 0) {
               reject(new Error(`Config validation failed: ${output || err.message}`));
               return;
             }
