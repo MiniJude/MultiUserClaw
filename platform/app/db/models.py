@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -91,6 +92,9 @@ class UsageRecord(Base):
     """LLM token usage per request."""
 
     __tablename__ = "usage_records"
+    __table_args__ = (
+        Index("ix_usage_records_user_created_at", "user_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)

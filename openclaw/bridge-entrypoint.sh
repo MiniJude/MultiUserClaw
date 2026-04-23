@@ -201,6 +201,7 @@ if [ -d /deploy-copy ]; then
         // Force-override critical settings that must always match defaults
         const forceOverrides = [
           ['tools.sessions.visibility', defaults.tools?.sessions?.visibility],
+          ['memory.backend', defaults.memory?.backend],
           ['memory.qmd.searchMode', defaults.memory?.qmd?.searchMode],
           ['agents.defaults.timeoutSeconds', defaults.agents?.defaults?.timeoutSeconds],
         ];

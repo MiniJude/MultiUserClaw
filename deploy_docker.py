@@ -427,7 +427,7 @@ def main():
             )
             container_ids = result.stdout.strip()
             if container_ids:
-                run(f"docker rm -f {container_ids}", check=False)
+                run(f"docker rm -f openclaw-user-{container_ids}", check=False)
                 success("旧用户容器已清理")
 
         # 设置 VITE_API_URL（frontend 构建需要）
