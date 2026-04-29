@@ -623,6 +623,59 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
     }
   }));
 
+  // GET /api/marketplaces/recommended/:category/:skillName/detail — get skill detail (SKILL.md + _meta.json)
+  router.get("/marketplaces/recommended/:category/:skillName/detail", asyncHandler(async (req, res) => {
+    const { category, skillName } = req.params;
+    const safeCat = String(category).replace(/[^a-zA-Z0-9_\-]/g, "");
+    const safeName = String(skillName).replace(/[^a-zA-Z0-9_\-]/g, "");
+
+    const repoDir = cloneOrPullRecommended(_config.skillsMarketplaceRepo);
+
+    // Resolve category directory
+    let catDir = safeCat;
+    const catFile = path.join(repoDir, "skills", "categories.json");
+    try {
+      const catData = JSON.parse(fs.readFileSync(catFile, "utf-8"));
+      const catMeta = catData.categories?.find((c: CategoryMeta) => c.id === safeCat);
+      if (catMeta?.path) catDir = catMeta.path;
+    } catch { /* use safeCat as fallback */ }
+
+    const skillDir = path.join(repoDir, "skills", catDir, safeName);
+    const skillMdPath = path.join(skillDir, "SKILL.md");
+
+    if (!fs.existsSync(skillMdPath)) {
+      res.status(404).json({ detail: `Skill "${safeName}" not found in category "${safeCat}"` });
+      return;
+    }
+
+    const skillMdContent = fs.readFileSync(skillMdPath, "utf-8");
+    const description = parseSkillMdDescription(skillMdContent);
+
+    // Strip frontmatter from markdown body for display
+    let markdownBody = skillMdContent;
+    const fmMatch = skillMdContent.match(/^---\s*\n[\s\S]*?\n---\s*\n/);
+    if (fmMatch) {
+      markdownBody = skillMdContent.slice(fmMatch[0].length);
+    }
+
+    // Read _meta.json if exists
+    let meta: Record<string, unknown> = {};
+    const metaPath = path.join(skillDir, "_meta.json");
+    try {
+      if (fs.existsSync(metaPath)) {
+        meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      }
+    } catch { /* ignore */ }
+
+    res.json({
+      name: safeName,
+      description,
+      category: safeCat,
+      markdown: markdownBody,
+      meta,
+    });
+  }));
+
   // -----------------------------------------------------------------------
   // Skills CLI integration (skills.sh)
   // -----------------------------------------------------------------------

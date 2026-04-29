@@ -339,11 +339,11 @@ if [ -d /deploy-copy ]; then
   fi
 
   # Sync qmd-runner.sh wrapper script
-  if [ -f /deploy-copy/qmd-runner.sh ]; then
-    sed 's/\r$//' /deploy-copy/qmd-runner.sh > "$OPENCLAW_STATE_DIR/qmd-runner.sh"
-    chmod +x "$OPENCLAW_STATE_DIR/qmd-runner.sh"
-    echo "[entrypoint] qmd-runner.sh synced"
-  fi
+#  if [ -f /deploy-copy/qmd-runner.sh ]; then
+#    sed 's/\r$//' /deploy-copy/qmd-runner.sh > "$OPENCLAW_STATE_DIR/qmd-runner.sh"
+#    chmod +x "$OPENCLAW_STATE_DIR/qmd-runner.sh"
+#    echo "[entrypoint] qmd-runner.sh synced"
+#  fi
 
   # Create MEMORY.md if it doesn't exist
   if [ ! -f "$OPENCLAW_STATE_DIR/memory/MEMORY.md" ]; then
@@ -365,13 +365,13 @@ MEMEOF
   fi
 
   # Initialize qmd memory collection (BM25 search mode, no embedding needed)
-  if command -v qmd >/dev/null 2>&1; then
-    qmd collection add "$OPENCLAW_STATE_DIR/memory" 2>/dev/null || true
-    qmd update 2>/dev/null || true
-    echo "[entrypoint] qmd memory collection initialized"
-  else
-    echo "[entrypoint] WARN: qmd not found, memory search unavailable"
-  fi
+#  if command -v qmd >/dev/null 2>&1; then
+#    qmd collection add "$OPENCLAW_STATE_DIR/memory" 2>/dev/null || true
+#    qmd update 2>/dev/null || true
+#    echo "[entrypoint] qmd memory collection initialized"
+#  else
+#    echo "[entrypoint] WARN: qmd not found, memory search unavailable"
+#  fi
 
   echo "[entrypoint] Deploy templates synced"
 

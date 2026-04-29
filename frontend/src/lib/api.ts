@@ -806,6 +806,29 @@ export async function installRecommendedSkill(
   )
 }
 
+export interface SkillDetail {
+  name: string
+  description: string
+  category: string
+  markdown: string
+  meta: {
+    ownerId?: string
+    slug?: string
+    version?: string
+    publishedAt?: number
+    changelog?: Array<{ version: string; date: string; changes: string[] }>
+  }
+}
+
+export async function getSkillDetail(
+  category: string,
+  skillName: string,
+): Promise<SkillDetail> {
+  return fetchJSON<SkillDetail>(
+    `/api/openclaw/marketplaces/recommended/${encodeURIComponent(category)}/${encodeURIComponent(skillName)}/detail`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Channels
 // ---------------------------------------------------------------------------

@@ -93,3 +93,15 @@
   ⚠️  Thinking 配置 → 暂不改（需要确认当前默认值）
 
   看起来没问题吗？需要调整吗？
+
+
+# 启动速度优化
+已删除 qmd： bridge-entrypoint.sh 中移除了 qmd collection add / qmd update 和 qmd-runner.sh 同步相关代码。
+已添加启动优化环境变量到 Dockerfile.bridge：
+环境变量
+OPENCLAW_SKIP_PROVIDERS=1
+OPENCLAW_SKIP_CRON=1
+OPENCLAW_LOAD_SHELL_ENV=0
+OPENCLAW_SKIP_BROWSER_CONTROL_SERVER=1
+这些变量能让 gateway 子进程的启动省掉若干阻塞操作。另外注意到 CMD 用的 node --import tsx bridge/start.ts 会在运行时用 tsx 重新编译 bridge 的 TypeScript，但 bridge 编译产物（bridge/dist/）已经存在。可以把 CMD 改成直接用编译后的 JS：
+CMD ["node", "bridge/dist/bridge/start.js"]

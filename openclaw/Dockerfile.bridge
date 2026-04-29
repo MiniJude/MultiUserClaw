@@ -81,6 +81,7 @@ RUN --mount=type=cache,id=openclaw-bridge-npm-cache,target=/root/.npm,sharing=lo
     npm install -g pnpm @steipete/summarize agent-browser && \
     (npm install -g @tobilu/qmd || echo "WARNING: qmd install failed, memory search will be unavailable")
 
+# SKIP一些检查，可以加快OPENCLAW的启动速度，方便docker快速启动
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV OPENCLAW_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV OPENCLAW_BROWSER_NO_SANDBOX=1
@@ -88,6 +89,10 @@ ENV OPENCLAW_SKIP_CHANNELS=1
 ENV OPENCLAW_SKIP_GMAIL_WATCHER=1
 ENV OPENCLAW_SKIP_CANVAS_HOST=1
 ENV OPENCLAW_DISABLE_BONJOUR=1
+ENV OPENCLAW_SKIP_PROVIDERS=1
+ENV OPENCLAW_SKIP_CRON=1
+ENV OPENCLAW_LOAD_SHELL_ENV=0
+ENV OPENCLAW_SKIP_BROWSER_CONTROL_SERVER=1
 
 WORKDIR /app
 
