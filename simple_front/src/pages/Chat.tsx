@@ -1,35 +1,38 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react'
+import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   Plus,
   Send,
   Loader2,
-  Trash2,
-  Pencil,
   MessageSquare,
   Bot,
-  User,
+  Search,
   RefreshCw,
   ChevronRight,
+  ChevronDown,
   Copy,
   Check,
   X,
-  Paperclip,
   FileText,
+  Menu,
 } from 'lucide-react'
 import MarkdownContent from '../components/MarkdownContent.tsx'
+import UserAvatar from '../components/UserAvatar.tsx'
+import AgentCreatePanel from '../components/AgentCreatePanel.tsx'
+import ClearableInput from '../components/ui/ClearableInput.tsx'
+import ClearableTextarea from '../components/ui/ClearableTextarea.tsx'
+import IconButton from '../components/ui/IconButton.tsx'
+import Tooltip from '../components/ui/Tooltip.tsx'
+import type { LayoutOutletContext } from '../components/Layout.tsx'
 import {
-  listSessions,
   getSession,
-  deleteSession,
-  updateSessionTitle,
   sendChatMessage,
   waitForAgentRun,
   listAgents,
   getAccessToken,
   uploadFileToWorkspace,
 } from '../lib/api.ts'
-import type { Session, SessionDetail, AgentInfo } from '../lib/api.ts'
+import type { SessionDetail, AgentInfo } from '../lib/api.ts'
 
 /**
  * Extract agentId from session key.
@@ -69,72 +72,111 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function normalizeSessionKey(key: string): string {
+  return key.replace(/:/g, '')
+}
+
 export default function Chat() {
   const [searchParams, setSearchParams] = useSearchParams()
+  const { user, refreshSessions, openMobileSidebar } = useOutletContext<LayoutOutletContext>()
 
   // Sessions
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [sessionsLoading, setSessionsLoading] = useState(true)
   const [activeSessionKey, setActiveSessionKey] = useState<string | null>(null)
-  const [renamingSessionKey, setRenamingSessionKey] = useState<string | null>(null)
-  const [renameValue, setRenameValue] = useState('')
-  const [renameSaving, setRenameSaving] = useState(false)
 
   // Chat
   const [messages, setMessages] = useState<SessionDetail['messages']>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [input, setInput] = useState('')
-  const [sending, setSending] = useState(false)
+  const [sendingBySession, setSendingBySession] = useState<Record<string, boolean>>({})
   const [error, setError] = useState('')
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
-  // Typewriter streaming: targetText is the full text from SSE, displayedText is what's shown
-  const [displayedText, setDisplayedText] = useState('')
-  const targetTextRef = useRef('')
-  const typewriterTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [displayedTextBySession, setDisplayedTextBySession] = useState<Record<string, string>>({})
+  const targetTextBySessionRef = useRef<Record<string, string>>({})
+  const typewriterTimersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({})
+  const sendingBySessionRef = useRef<Record<string, boolean>>({})
+  const sseCompletedRef = useRef<Record<string, boolean>>({})
+  const sseFinalTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
-  const setStreamingText = useCallback((text: string) => {
-    if (!text) {
-      // Clear everything
-      targetTextRef.current = ''
-      setDisplayedText('')
-      if (typewriterTimerRef.current) {
-        clearInterval(typewriterTimerRef.current)
-        typewriterTimerRef.current = null
+  const setSendingForSession = useCallback((key: string, value: boolean) => {
+    setSendingBySession(prev => {
+      const next = { ...prev }
+      if (value) {
+        next[key] = true
+      } else {
+        delete next[key]
       }
-      return
-    }
-    targetTextRef.current = text
-    // Start typewriter if not already running
-    if (!typewriterTimerRef.current) {
-      typewriterTimerRef.current = setInterval(() => {
-        setDisplayedText(prev => {
-          const target = targetTextRef.current
-          if (prev.length >= target.length) {
-            // Caught up — stop timer
-            if (typewriterTimerRef.current) {
-              clearInterval(typewriterTimerRef.current)
-              typewriterTimerRef.current = null
-            }
-            return target
-          }
-          // Reveal 2-4 characters per tick for natural speed
-          const charsToAdd = Math.min(3, target.length - prev.length)
-          return target.substring(0, prev.length + charsToAdd)
-        })
-      }, 20) // ~50fps, 3 chars per tick ≈ 150 chars/sec
+      sendingBySessionRef.current = next
+      return next
+    })
+  }, [])
+
+  const clearStreamingText = useCallback((key: string) => {
+    targetTextBySessionRef.current[key] = ''
+    setDisplayedTextBySession(prev => {
+      if (!prev[key]) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+    if (typewriterTimersRef.current[key]) {
+      clearInterval(typewriterTimersRef.current[key])
+      delete typewriterTimersRef.current[key]
     }
   }, [])
 
-  // New session
-  const [showNewSession, setShowNewSession] = useState(false)
+  const setStreamingText = useCallback((key: string, text: string) => {
+    if (!text) {
+      clearStreamingText(key)
+      return
+    }
+
+    targetTextBySessionRef.current[key] = text
+    if (!typewriterTimersRef.current[key]) {
+      typewriterTimersRef.current[key] = setInterval(() => {
+        setDisplayedTextBySession(prev => {
+          const target = targetTextBySessionRef.current[key] || ''
+          const current = prev[key] || ''
+          if (current.length >= target.length) {
+            if (typewriterTimersRef.current[key]) {
+              clearInterval(typewriterTimersRef.current[key])
+              delete typewriterTimersRef.current[key]
+            }
+            return { ...prev, [key]: target }
+          }
+          const charsToAdd = Math.min(3, target.length - current.length)
+          return { ...prev, [key]: target.substring(0, current.length + charsToAdd) }
+        })
+      }, 20)
+    }
+  }, [clearStreamingText])
+
   const [agents, setAgents] = useState<AgentInfo[]>([])
-  const [agentsLoading, setAgentsLoading] = useState(false)
-  const [defaultAgentId, setDefaultAgentId] = useState('')
+  const [draftAgentId, setDraftAgentId] = useState('')
+  const [isDraftSession, setIsDraftSession] = useState(false)
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false)
+  const [agentCreateOpen, setAgentCreateOpen] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [agentSearch, setAgentSearch] = useState('')
+  const [agentPickerStyle, setAgentPickerStyle] = useState<CSSProperties>({})
+  const [agentPickerListMaxHeight, setAgentPickerListMaxHeight] = useState(288)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const activeSessionKeyRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const agentPickerRef = useRef<HTMLDivElement>(null)
+  const agentPickerButtonRef = useRef<HTMLButtonElement>(null)
+  const sessionLoadSeqRef = useRef(0)
+
+  const resolveKnownSessionKey = useCallback((rawKey: string): string => {
+    const normalized = normalizeSessionKey(rawKey)
+    const candidates = [
+      activeSessionKeyRef.current,
+      ...Object.keys(sendingBySessionRef.current),
+      ...Object.keys(targetTextBySessionRef.current),
+    ].filter(Boolean) as string[]
+    return candidates.find(key => normalizeSessionKey(key) === normalized) || rawKey
+  }, [])
 
   // Files
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
@@ -143,17 +185,10 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
-  const getAgentDisplayName = useCallback((agentId: string) => {
-    const agent = agents.find(item => item.id === agentId)
-    if (!agent) return agentId
-    return agent.identity?.name || agent.name || agent.id
-  }, [agents])
-
   const loadAgentsCatalog = useCallback(async () => {
     try {
       const result = await listAgents()
       setAgents(result.agents || [])
-      setDefaultAgentId(result.defaultId || '')
     } catch {
       setAgents([])
     }
@@ -161,117 +196,147 @@ export default function Chat() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, displayedText, scrollToBottom])
-
-  // Load sessions
-  const fetchSessions = useCallback(async () => {
-    setSessionsLoading(true)
-    try {
-      const result = await listSessions()
-      setSessions(result)
-    } catch {
-      setSessions([])
-    } finally {
-      setSessionsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchSessions()
-  }, [fetchSessions])
+  }, [messages, activeSessionKey, displayedTextBySession, scrollToBottom])
 
   useEffect(() => {
     loadAgentsCatalog()
   }, [loadAgentsCatalog])
+
+  useEffect(() => {
+    const createdAgent = searchParams.get('createdAgent')
+    if (!createdAgent) return
+    setNotice(`已创建“${createdAgent}”，可以开始对话了`)
+    const timer = window.setTimeout(() => setNotice(''), 6000)
+    return () => window.clearTimeout(timer)
+  }, [searchParams])
+
+  const updateAgentPickerPosition = useCallback(() => {
+    const button = agentPickerButtonRef.current
+    if (!button) return
+
+    const rect = button.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const margin = 12
+    const gap = 8
+    const panelWidth = Math.min(320, viewportWidth - margin * 2)
+    const left = Math.min(
+      Math.max(rect.left, margin),
+      viewportWidth - panelWidth - margin,
+    )
+
+    const spaceAbove = rect.top - margin
+    const spaceBelow = viewportHeight - rect.bottom - margin
+    const openBelow = spaceBelow >= 280 || spaceBelow > spaceAbove
+    const availableSpace = Math.max(
+      180,
+      (openBelow ? spaceBelow : spaceAbove) - gap,
+    )
+    const panelMaxHeight = Math.min(420, availableSpace)
+    const top = openBelow
+      ? Math.min(rect.bottom + gap, viewportHeight - panelMaxHeight - margin)
+      : Math.max(margin, rect.top - panelMaxHeight - gap)
+    const reservedHeight = draftAgentId && !agentSearch.trim() ? 126 : 72
+
+    setAgentPickerStyle({
+      position: 'fixed',
+      top,
+      left,
+      width: panelWidth,
+      maxHeight: panelMaxHeight,
+    })
+    setAgentPickerListMaxHeight(Math.max(108, panelMaxHeight - reservedHeight))
+  }, [agentSearch, draftAgentId])
+
+  useEffect(() => {
+    if (!agentPickerOpen) return
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (target && agentPickerRef.current?.contains(target)) return
+      setAgentPickerOpen(false)
+    }
+    const updatePosition = () => updateAgentPickerPosition()
+    requestAnimationFrame(updatePosition)
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [agentPickerOpen, updateAgentPickerPosition])
 
   // Restore session from URL param
   useEffect(() => {
     const sessionKey = searchParams.get('session')
     if (sessionKey && sessionKey !== activeSessionKey) {
       loadSession(sessionKey)
+      return
+    }
+    if (!sessionKey && searchParams.get('new') !== '1') {
+      sessionLoadSeqRef.current += 1
+      setActiveSessionKey(null)
+      activeSessionKeyRef.current = null
+      setMessages([])
+      setPendingFiles([])
+      setChatLoading(false)
+      setIsDraftSession(false)
     }
   }, [searchParams])
 
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return
+    const agentId = searchParams.get('agent') || ''
+    sessionLoadSeqRef.current += 1
+    setActiveSessionKey(null)
+    activeSessionKeyRef.current = null
+    setMessages([])
+    setPendingFiles([])
+    setError('')
+    setChatLoading(false)
+    setIsDraftSession(true)
+    setDraftAgentId(agentId)
+    setAgentPickerOpen(false)
+    setTimeout(() => inputRef.current?.focus(), 100)
+  }, [searchParams])
+
   const loadSession = async (key: string) => {
+    const loadSeq = sessionLoadSeqRef.current + 1
+    sessionLoadSeqRef.current = loadSeq
     setActiveSessionKey(key)
     activeSessionKeyRef.current = key
+    setIsDraftSession(false)
+    setDraftAgentId(getAgentIdFromKey(key))
+    setAgentPickerOpen(false)
     setChatLoading(true)
     setError('')
     setSearchParams({ session: key })
     try {
       const detail = await getSession(key)
+      if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
       setMessages(detail.messages || [])
     } catch (err: any) {
+      if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
       setError(err?.message || '加载会话失败')
       setMessages([])
     } finally {
-      setChatLoading(false)
-    }
-  }
-
-  const handleDeleteSession = async (key: string, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!confirm('确定删除这个会话？')) return
-    try {
-      await deleteSession(key)
-      setSessions(prev => prev.filter(s => s.key !== key))
-      if (activeSessionKey === key) {
-        setActiveSessionKey(null)
-        activeSessionKeyRef.current = null
-        setMessages([])
-        setSearchParams({})
+      if (sessionLoadSeqRef.current === loadSeq && activeSessionKeyRef.current === key) {
+        setChatLoading(false)
       }
-    } catch {
-      // ignore
     }
   }
 
-  const handleStartRename = (session: Session, e: React.MouseEvent) => {
-    e.stopPropagation()
-    setRenamingSessionKey(session.key)
-    setRenameValue(session.title || '')
-  }
-
-  const handleCancelRename = useCallback(() => {
-    setRenamingSessionKey(null)
-    setRenameValue('')
-    setRenameSaving(false)
-  }, [])
-
-  const handleSaveRename = useCallback(async (key: string) => {
-    if (renameSaving) return
-    setRenameSaving(true)
-    try {
-      await updateSessionTitle(key, renameValue)
-      await fetchSessions()
-      handleCancelRename()
-    } catch (err: any) {
-      setError(err?.message || '重命名失败')
-      setRenameSaving(false)
-    }
-  }, [fetchSessions, handleCancelRename, renameSaving, renameValue])
-
-  const handleNewSession = async () => {
-    setShowNewSession(true)
-    setAgentsLoading(true)
-    try {
-      await loadAgentsCatalog()
-    } catch {
-      setAgents([])
-    } finally {
-      setAgentsLoading(false)
-    }
-  }
-
-  const startNewSession = (agentId: string) => {
-    const key = `agent:${agentId}:session-${Date.now()}`
-    setActiveSessionKey(key)
-    activeSessionKeyRef.current = key
+  const createDraftSession = (agentId = '') => {
+    sessionLoadSeqRef.current += 1
+    setActiveSessionKey(null)
+    activeSessionKeyRef.current = null
     setMessages([])
     setPendingFiles([])
-    setShowNewSession(false)
     setError('')
-    setSearchParams({ session: key })
+    setIsDraftSession(true)
+    setDraftAgentId(agentId)
+    setSearchParams(agentId ? { new: '1', agent: agentId } : { new: '1' })
     setTimeout(() => inputRef.current?.focus(), 100)
   }
 
@@ -325,23 +390,17 @@ export default function Chat() {
 
   // SSE connection for real-time chat events (replaces WebSocket)
   const sseRef = useRef<EventSource | null>(null)
-  const sseCompletedRef = useRef(false)
-  const sseFinalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleChatEvent = useCallback((payload: any) => {
-    const { state, sessionKey } = payload
-    const currentKey = activeSessionKeyRef.current
-    console.log('[SSE] handleChatEvent:', { state, sessionKey, currentKey })
-    if (!sessionKey || !currentKey) {
-      console.log('[SSE] 跳过: sessionKey或currentKey为空')
+    const { state, sessionKey: rawSessionKey } = payload
+    if (!rawSessionKey) {
+      console.log('[SSE] 跳过: sessionKey为空')
       return
     }
 
-    const normalizedGw = sessionKey.replace(/:/g, '')
-    const normalizedActive = currentKey.replace(/:/g, '')
-    const isCurrentSession = normalizedGw === normalizedActive || sessionKey === currentKey
-    console.log('[SSE] session匹配:', { normalizedGw, normalizedActive, isCurrentSession })
-    if (!isCurrentSession) return
+    const eventSessionKey = resolveKnownSessionKey(String(rawSessionKey))
+    const isVisibleSession = eventSessionKey === activeSessionKeyRef.current
+    console.log('[SSE] handleChatEvent:', { state, eventSessionKey, isVisibleSession })
 
     // Streaming delta — extract text and update incrementally
     if (state === 'delta' && payload.message) {
@@ -350,17 +409,17 @@ export default function Chat() {
       if (Array.isArray(content)) {
         const textPart = content.find((c: any) => c.type === 'text')
         if (textPart?.text) {
-          setStreamingText(textPart.text)
+          setStreamingText(eventSessionKey, textPart.text)
         }
       } else if (typeof content === 'string') {
-        setStreamingText(content)
+        setStreamingText(eventSessionKey, content)
       }
       return
     }
 
     // Started — clear streaming text for new turn
     if (state === 'started') {
-      setStreamingText('')
+      setStreamingText(eventSessionKey, '')
       return
     }
 
@@ -368,24 +427,27 @@ export default function Chat() {
     if (state === 'final' || state === 'error' || state === 'aborted') {
       // Don't clear streamingText yet — keep it visible until messages load
 
-      // Debounce: reset the completion timer on every "final"
-      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
-      sseFinalTimerRef.current = setTimeout(() => {
+      if (sseFinalTimersRef.current[eventSessionKey]) {
+        clearTimeout(sseFinalTimersRef.current[eventSessionKey])
+      }
+      sseFinalTimersRef.current[eventSessionKey] = setTimeout(() => {
         // No new "final" events for 3s — agent is truly done
-        getSession(currentKey).then(detail => {
-          setMessages(detail.messages || [])
-          setStreamingText('')
-          setSending(false)
-          sseCompletedRef.current = true
-          fetchSessions()
+        getSession(eventSessionKey).then(detail => {
+          if (activeSessionKeyRef.current === eventSessionKey) {
+            setMessages(detail.messages || [])
+          }
+          clearStreamingText(eventSessionKey)
+          setSendingForSession(eventSessionKey, false)
+          sseCompletedRef.current[eventSessionKey] = true
+          refreshSessions()
         }).catch(() => {
-          setStreamingText('')
-          setSending(false)
-          sseCompletedRef.current = true
+          clearStreamingText(eventSessionKey)
+          setSendingForSession(eventSessionKey, false)
+          sseCompletedRef.current[eventSessionKey] = true
         })
       }, 3000)
     }
-  }, [fetchSessions])
+  }, [clearStreamingText, refreshSessions, resolveKnownSessionKey, setSendingForSession, setStreamingText])
 
   // Connect SSE on mount
   useEffect(() => {
@@ -423,8 +485,10 @@ export default function Chat() {
 
     return () => {
       console.log('[SSE] 清理连接')
-      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
-      if (typewriterTimerRef.current) clearInterval(typewriterTimerRef.current)
+      Object.values(sseFinalTimersRef.current).forEach(timer => clearTimeout(timer))
+      sseFinalTimersRef.current = {}
+      Object.values(typewriterTimersRef.current).forEach(timer => clearInterval(timer))
+      typewriterTimersRef.current = {}
       sse.close()
       sseRef.current = null
     }
@@ -433,31 +497,30 @@ export default function Chat() {
   const waitForResponse = async (key: string, runId: string | null) => {
     // SSE handles incremental display. Completion should come from runId-based
     // waiting so we don't mistake a partial assistant message for a finished turn.
-    sseCompletedRef.current = false
+    sseCompletedRef.current[key] = false
     const maxWaitMs = 240000 // 4 minutes max
     const perRequestTimeoutMs = 25000
     const startTime = Date.now()
 
     while (Date.now() - startTime < maxWaitMs) {
-      if (sseCompletedRef.current) return
-      if (key !== activeSessionKeyRef.current) return
-
+      if (sseCompletedRef.current[key]) return
       if (runId) {
         try {
           const remainingMs = maxWaitMs - (Date.now() - startTime)
           const waitResult = await waitForAgentRun(runId, Math.min(perRequestTimeoutMs, remainingMs))
 
-          if (sseCompletedRef.current) return
-          if (key !== activeSessionKeyRef.current) return
+          if (sseCompletedRef.current[key]) return
 
           if (waitResult.status === 'timeout') {
             continue
           }
 
           const detail = await getSession(key)
-          setMessages(detail.messages || [])
-          setStreamingText('')
-          sseCompletedRef.current = true
+          if (key === activeSessionKeyRef.current) {
+            setMessages(detail.messages || [])
+          }
+          clearStreamingText(key)
+          sseCompletedRef.current[key] = true
           return
         } catch {
           await new Promise(r => setTimeout(r, 1500))
@@ -471,10 +534,12 @@ export default function Chat() {
         const detail = await getSession(key)
         const msgs = detail.messages || []
         const lastMsg = msgs[msgs.length - 1]
-        if (lastMsg?.role === 'assistant' && !targetTextRef.current) {
-          setMessages(msgs)
-          setStreamingText('')
-          sseCompletedRef.current = true
+        if (lastMsg?.role === 'assistant' && !targetTextBySessionRef.current[key]) {
+          if (key === activeSessionKeyRef.current) {
+            setMessages(msgs)
+          }
+          clearStreamingText(key)
+          sseCompletedRef.current[key] = true
           return
         }
       } catch {
@@ -485,21 +550,32 @@ export default function Chat() {
     // Timeout — load final state
     try {
       const detail = await getSession(key)
-      setMessages(detail.messages || [])
+      if (key === activeSessionKeyRef.current) {
+        setMessages(detail.messages || [])
+      }
     } catch {}
-    setStreamingText('')
-    sseCompletedRef.current = true
+    clearStreamingText(key)
+    sseCompletedRef.current[key] = true
   }
 
   const handleSend = async () => {
     const text = input.trim()
-    if ((!text && pendingFiles.length === 0) || !activeSessionKey || sending) return
+    if ((!text && pendingFiles.length === 0) || (!activeSessionKey && !isDraftSession)) return
 
-    setSending(true)
+    const sendingSessionKey = activeSessionKey || `agent:${draftAgentId || 'main'}:session-${Date.now()}`
+    if (sendingBySession[sendingSessionKey]) return
+    if (!activeSessionKey) {
+      setActiveSessionKey(sendingSessionKey)
+      activeSessionKeyRef.current = sendingSessionKey
+      setIsDraftSession(false)
+      setAgentPickerOpen(false)
+      setSearchParams({ session: sendingSessionKey })
+    }
+    setSendingForSession(sendingSessionKey, true)
     setError('')
 
     try {
-      const agentId = getAgentIdFromKey(activeSessionKey)
+      const agentId = getAgentIdFromKey(sendingSessionKey)
       const uploadDir = getUploadDir(agentId)
 
       // Upload all files to agent workspace
@@ -543,14 +619,14 @@ export default function Chat() {
       })
       setPendingFiles([])
 
-      setStreamingText('')
-      const sendResult = await sendChatMessage(activeSessionKey, finalMessage)
-      await waitForResponse(activeSessionKey, sendResult.runId)
-      fetchSessions()
+      clearStreamingText(sendingSessionKey)
+      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage)
+      await waitForResponse(sendingSessionKey, sendResult.runId)
+      void refreshSessions()
     } catch (err: any) {
       setError(err?.message || '发送失败')
     } finally {
-      setSending(false)
+      setSendingForSession(sendingSessionKey, false)
     }
   }
 
@@ -567,6 +643,28 @@ export default function Chat() {
     }
   }
 
+  const handleSelectDraftAgent = (agentId: string) => {
+    setDraftAgentId(agentId)
+    setAgentPickerOpen(false)
+    setAgentSearch('')
+    setSearchParams({ new: '1', agent: agentId })
+  }
+
+  const handleClearDraftAgent = () => {
+    setDraftAgentId('')
+    setAgentPickerOpen(false)
+    setAgentSearch('')
+    setSearchParams({ new: '1' })
+  }
+
+  const handleAgentCreated = async (agentId: string, displayName: string) => {
+    setAgentCreateOpen(false)
+    setNotice(`已创建“${displayName}”，可以开始对话了`)
+    await loadAgentsCatalog()
+    handleSelectDraftAgent(agentId)
+    window.setTimeout(() => setNotice(''), 6000)
+  }
+
   const formatTime = (iso: string | null) => {
     if (!iso) return ''
     const d = new Date(iso)
@@ -578,155 +676,257 @@ export default function Chat() {
   }
 
   const hasContent = input.trim() || pendingFiles.length > 0
+  const isCurrentSending = Boolean(activeSessionKey && sendingBySession[activeSessionKey])
+  const displayedText = activeSessionKey ? displayedTextBySession[activeSessionKey] || '' : ''
+  const isDraftStart = isDraftSession && messages.length === 0 && !activeSessionKey
+  const agentOptions = useMemo(() => {
+    const hasMain = agents.some(agent => agent.id === 'main')
+    const mainAgent: AgentInfo = {
+      id: 'main',
+      name: '普通对话',
+      identity: { name: '普通对话' },
+    }
+    return hasMain ? agents : [mainAgent, ...agents]
+  }, [agents])
+  const currentAgentId = activeSessionKey ? getAgentIdFromKey(activeSessionKey) : draftAgentId
+  const selectedAgent = currentAgentId ? agentOptions.find(agent => agent.id === currentAgentId) : null
+  const selectedAgentLabel =
+    selectedAgent?.identity?.name || selectedAgent?.name || currentAgentId || '选择 Agent'
+  const agentQuery = agentSearch.trim().toLowerCase()
+  const selectableAgents = agentOptions.filter(agent => agent.id !== 'main')
+  const filteredAgents = selectableAgents.filter(agent => {
+    if (!agentQuery) return true
+    const values = [agent.id, agent.name, agent.identity?.name].filter(Boolean).join(' ').toLowerCase()
+    return values.includes(agentQuery)
+  })
+  const canChangeAgent = isDraftSession && messages.length === 0 && !isCurrentSending
 
-  return (
-    <div className="flex h-[calc(100vh-3rem)] pt-6">
-      {/* Session sidebar */}
-      <div className="w-64 border-r border-light-border bg-light-sidebar flex flex-col shrink-0">
-        <div className="px-4 py-3 border-b border-light-border flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-light-text">会话</h2>
-          <button
-            onClick={handleNewSession}
-            className="flex items-center gap-1 rounded-lg bg-accent-blue px-2.5 py-1 text-xs font-medium text-white hover:bg-accent-blue/90 transition-colors"
-          >
-            <Plus size={12} />
-            新建
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {sessionsLoading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 size={18} className="animate-spin text-accent-blue" />
-            </div>
-          ) : sessions.length === 0 ? (
-            <div className="px-4 py-8 text-center text-xs text-light-text-secondary">
-              暂无会话
+  const pendingFilesPreview = pendingFiles.length > 0 && (
+    <div className="flex flex-wrap gap-2">
+      {pendingFiles.map(pf => (
+        <div
+          key={pf.id}
+          className="relative group rounded-lg border border-light-border bg-light-card overflow-hidden"
+        >
+          {pf.isImage && pf.previewUrl ? (
+            <div className="relative">
+              <img
+                src={pf.previewUrl}
+                alt={pf.name}
+                className="h-16 w-16 object-cover"
+              />
+              <div className="absolute bottom-0 left-0 right-0 bg-black/50 px-1 py-0.5">
+                <div className="text-[9px] text-white truncate">{pf.name}</div>
+              </div>
             </div>
           ) : (
-            <div className="py-1">
-              {sessions.map(s => {
-                const isRenaming = renamingSessionKey === s.key
-                const isActive = activeSessionKey === s.key
-
-                return (
-                  <div
-                    key={s.key}
-                    className={`group flex items-center gap-2 px-3 py-2.5 transition-colors ${
-                      isActive
-                        ? 'bg-accent-blue/10 text-accent-blue'
-                        : 'text-light-text-secondary hover:bg-light-card hover:text-light-text'
-                    }`}
-                  >
-                    <button
-                      onClick={() => !isRenaming && loadSession(s.key)}
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      disabled={isRenaming}
-                    >
-                      <MessageSquare size={14} className="shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        {isRenaming ? (
-                          <input
-                            value={renameValue}
-                            onChange={(e) => setRenameValue(e.target.value)}
-                            onClick={(e) => e.stopPropagation()}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault()
-                                void handleSaveRename(s.key)
-                              } else if (e.key === 'Escape') {
-                                e.preventDefault()
-                                handleCancelRename()
-                              }
-                            }}
-                            className="w-full rounded border border-accent-blue/40 bg-light-bg px-2 py-1 text-xs font-medium text-light-text outline-none focus:border-accent-blue"
-                            placeholder="输入会话标题"
-                            autoFocus
-                          />
-                        ) : (
-                          <div className="text-xs font-medium truncate">
-                            {s.title || s.key}
-                          </div>
-                        )}
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-light-text-secondary">
-                          <span>{formatTime(s.updated_at)}</span>
-                          <span className="rounded-full border border-light-border bg-light-bg/80 px-1.5 py-0.5 text-[9px] font-medium text-light-text-secondary">
-                            {getAgentDisplayName(getAgentIdFromKey(s.key))}
-                          </span>
-                        </div>
-                      </div>
-                    </button>
-
-                    <div className="flex shrink-0 items-center gap-1">
-                      {isRenaming ? (
-                        <>
-                          <button
-                            onClick={() => void handleSaveRename(s.key)}
-                            className="text-light-text-secondary hover:text-accent-blue transition-colors"
-                            title="保存标题"
-                            disabled={renameSaving}
-                          >
-                            {renameSaving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                          </button>
-                          <button
-                            onClick={handleCancelRename}
-                            className="text-light-text-secondary hover:text-light-text transition-colors"
-                            title="取消"
-                            disabled={renameSaving}
-                          >
-                            <X size={12} />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            onClick={(e) => handleStartRename(s, e)}
-                            className="opacity-0 group-hover:opacity-100 text-light-text-secondary hover:text-light-text transition-all"
-                            title="重命名"
-                          >
-                            <Pencil size={12} />
-                          </button>
-                          <button
-                            onClick={(e) => handleDeleteSession(s.key, e)}
-                            className="opacity-0 group-hover:opacity-100 text-light-text-secondary hover:text-accent-red transition-all"
-                            title="删除"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
+            <div className="h-16 w-auto flex items-center gap-2 px-3">
+              <FileText size={16} className="text-accent-blue shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs text-light-text truncate max-w-[120px]">{pf.name}</div>
+                <div className="text-[10px] text-light-text-secondary">{formatFileSize(pf.file.size)}</div>
+              </div>
             </div>
           )}
+          <span className="absolute top-0.5 right-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            <Tooltip content={`移除附件 ${pf.name}`}>
+              <button
+                onClick={() => removePendingFile(pf.id)}
+                className="flex h-4 w-4 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/75"
+              >
+                <X size={10} />
+              </button>
+            </Tooltip>
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+
+  const agentPicker = agentPickerOpen && canChangeAgent && (
+    <div
+      className="z-40 flex flex-col overflow-hidden rounded-2xl border border-light-border bg-white p-3 shadow-xl shadow-slate-200/80"
+      style={agentPickerStyle}
+    >
+      <div className="mb-2 flex items-center gap-2 rounded-xl border border-light-border px-3 py-2 text-sm text-light-text-secondary">
+        <Search size={15} />
+        <ClearableInput
+          value={agentSearch}
+          onValueChange={setAgentSearch}
+          className="min-w-0 flex-1 bg-transparent text-sm text-light-text outline-none placeholder:text-light-text-secondary"
+          placeholder="搜索 Agent"
+          autoFocus
+          clearLabel="清空 Agent 搜索"
+        />
+      </div>
+      <div className="overflow-y-auto pr-1" style={{ maxHeight: agentPickerListMaxHeight }}>
+        {filteredAgents.length === 0 ? (
+          <div className="px-2 py-4 text-center text-xs text-light-text-secondary">没有匹配的 Agent</div>
+        ) : filteredAgents.map(agent => {
+          const label = agent.identity?.name || agent.name || agent.id
+          const selected = Boolean(draftAgentId) && agent.id === draftAgentId
+          return (
+            <button
+              key={agent.id}
+              onClick={() => handleSelectDraftAgent(agent.id)}
+              className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:bg-light-card-hover"
+            >
+              <Bot size={16} className="text-accent-blue" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-light-text">{label}</div>
+                <div className="truncate text-xs text-light-text-secondary">{agent.id}</div>
+              </div>
+              {selected && <Check size={15} className="text-accent-blue" />}
+            </button>
+          )
+        })}
+      </div>
+      <div className="mt-2 space-y-1 border-t border-light-border pt-2">
+        {draftAgentId && !agentQuery && (
+          <button
+            onClick={handleClearDraftAgent}
+            className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text"
+          >
+            <X size={16} />
+            <span>不指定 Agent</span>
+          </button>
+        )}
+        <button
+          onClick={() => {
+            setAgentPickerOpen(false)
+            setAgentCreateOpen(true)
+          }}
+          className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text"
+        >
+          <Plus size={16} />
+          <span>创建更匹配的专属 Agent</span>
+        </button>
+      </div>
+    </div>
+  )
+
+  const renderAgentSelector = (compact = false) => (
+    <div ref={agentPickerRef} className="relative">
+      <button
+        ref={agentPickerButtonRef}
+        onClick={() => {
+          if (!canChangeAgent) return
+          setAgentPickerOpen(value => !value)
+        }}
+        disabled={!canChangeAgent}
+        className={`flex items-center gap-2 rounded-xl border border-light-border bg-light-card px-3 py-1.5 text-xs transition-colors ${
+          canChangeAgent
+            ? 'cursor-pointer text-light-text-secondary hover:border-accent-blue/30 hover:text-light-text'
+            : 'cursor-not-allowed text-light-text-secondary/60'
+        } ${compact && !draftAgentId ? 'text-accent-blue' : ''}`}
+        title={canChangeAgent ? '选择 Agent' : '当前对话已锁定 Agent'}
+      >
+        <Bot size={14} />
+        <span className="max-w-[180px] truncate">{selectedAgentLabel}</span>
+        <ChevronDown size={13} />
+      </button>
+      {agentPicker}
+    </div>
+  )
+
+  const renderComposer = (hero = false) => (
+    <div className={hero ? 'relative rounded-[26px] border border-light-border bg-white p-3 shadow-lg shadow-slate-200/80' : 'relative mx-auto max-w-4xl rounded-[26px] border border-light-border bg-white p-3 shadow-lg shadow-slate-200/70'}>
+      {pendingFilesPreview && (
+        <div className="px-2 pb-2">{pendingFilesPreview}</div>
+      )}
+      <div className="flex flex-col">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          onChange={handleFileSelect}
+          className="hidden"
+        />
+        <ClearableTextarea
+          ref={inputRef}
+          value={input}
+          onValueChange={setInput}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={hero ? '向 OpenClaw 发送消息，或选择一个 Agent 开始' : '要求后续变更'}
+          rows={hero ? 3 : 2}
+          className="min-h-[72px] w-full resize-none bg-transparent px-2 py-2 text-[15px] text-light-text outline-none placeholder:text-slate-400"
+          disabled={isCurrentSending}
+          clearLabel="清空消息"
+        />
+        <div className="mt-2 flex items-center justify-between gap-3 px-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <IconButton
+              label="上传附件（图片/文件）"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isCurrentSending}
+              size="md"
+              tone="primary"
+              className="h-9 w-9 rounded-xl"
+            >
+              <Plus size={18} />
+            </IconButton>
+            {renderAgentSelector(true)}
+          </div>
+          <IconButton
+            label="发送"
+            onClick={handleSend}
+            disabled={!hasContent || isCurrentSending}
+            className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700 disabled:bg-slate-300"
+          >
+            {isCurrentSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+          </IconButton>
         </div>
       </div>
+    </div>
+  )
 
+  return (
+    <div className="flex h-full">
       {/* Chat area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {activeSessionKey ? (
+        {notice && (
+          <div className="pointer-events-none fixed left-1/2 top-4 z-[80] -translate-x-1/2 rounded-xl border border-accent-green/20 bg-light-card px-4 py-2 text-sm text-light-text shadow-xl shadow-slate-200/80">
+            {notice}
+          </div>
+        )}
+
+        {activeSessionKey || isDraftSession ? (
           <>
             {/* Chat header */}
             <div className="px-5 py-3 border-b border-light-border flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2 min-w-0">
+                <IconButton
+                  label="展开菜单"
+                  onClick={openMobileSidebar}
+                  size="md"
+                  surface="plain"
+                  className="-ml-2 lg:hidden"
+                >
+                  <Menu size={20} />
+                </IconButton>
                 <Bot size={16} className="text-accent-blue shrink-0" />
                 <span className="text-sm font-medium text-light-text truncate">
-                  {getAgentIdFromKey(activeSessionKey)}
+                  {isDraftStart ? '新对话' : selectedAgentLabel}
                 </span>
-                <ChevronRight size={12} className="text-light-text-secondary shrink-0" />
-                <span className="text-xs text-light-text-secondary truncate">
-                  {activeSessionKey.split(':').pop()}
-                </span>
+                {activeSessionKey && (
+                  <>
+                    <ChevronRight size={12} className="text-light-text-secondary shrink-0" />
+                    <span className="text-xs text-light-text-secondary truncate">
+                      {activeSessionKey.split(':').pop()}
+                    </span>
+                  </>
+                )}
               </div>
-              <button
-                onClick={handleRefresh}
-                className="text-light-text-secondary hover:text-light-text transition-colors"
-                title="刷新"
-              >
-                <RefreshCw size={14} />
-              </button>
+              {activeSessionKey && (
+                <IconButton
+                  label="刷新"
+                  onClick={handleRefresh}
+                  size="sm"
+                >
+                  <RefreshCw size={14} />
+                </IconButton>
+              )}
             </div>
 
             {/* Messages */}
@@ -735,10 +935,19 @@ export default function Chat() {
                 <div className="flex items-center justify-center py-12">
                   <Loader2 size={24} className="animate-spin text-accent-blue" />
                 </div>
-              ) : messages.length === 0 ? (
+              ) : messages.length === 0 && !isDraftSession ? (
                 <div className="flex flex-col items-center justify-center py-20 text-light-text-secondary">
                   <MessageSquare size={40} className="mb-3 opacity-30" />
                   <p className="text-sm">发送消息开始对话</p>
+                </div>
+              ) : isDraftStart ? (
+                <div className="flex h-full items-start justify-center px-6 pt-[13vh]">
+                  <div className="w-full max-w-4xl">
+                    <h1 className="mb-12 text-center text-3xl font-medium tracking-normal text-light-text">
+                      我们该做什么？
+                    </h1>
+                    {renderComposer(true)}
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4 max-w-3xl mx-auto">
@@ -787,13 +996,11 @@ export default function Chat() {
                         )}
                       </div>
                       {msg.role === 'user' && (
-                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-purple/10 text-accent-purple mt-0.5">
-                          <User size={14} />
-                        </div>
+                        <UserAvatar user={user} size="sm" className="mt-0.5" />
                       )}
                     </div>
                   ))}
-                  {sending && (
+                  {isCurrentSending && (
                     <div className="flex gap-3">
                       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
                         <Bot size={14} />
@@ -827,93 +1034,28 @@ export default function Chat() {
               </div>
             )}
 
-            {/* Pending files preview */}
-            {pendingFiles.length > 0 && (
-              <div className="px-5 pt-2 shrink-0">
-                <div className="max-w-3xl mx-auto flex flex-wrap gap-2">
-                  {pendingFiles.map(pf => (
-                    <div
-                      key={pf.id}
-                      className="relative group rounded-lg border border-light-border bg-light-card overflow-hidden"
-                    >
-                      {pf.isImage && pf.previewUrl ? (
-                        <div className="relative">
-                          <img
-                            src={pf.previewUrl}
-                            alt={pf.name}
-                            className="h-16 w-16 object-cover"
-                          />
-                          <div className="absolute bottom-0 left-0 right-0 bg-black/50 px-1 py-0.5">
-                            <div className="text-[9px] text-white truncate">{pf.name}</div>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="h-16 w-auto flex items-center gap-2 px-3">
-                          <FileText size={16} className="text-accent-blue shrink-0" />
-                          <div className="min-w-0">
-                            <div className="text-xs text-light-text truncate max-w-[120px]">{pf.name}</div>
-                            <div className="text-[10px] text-light-text-secondary">{formatFileSize(pf.file.size)}</div>
-                          </div>
-                        </div>
-                      )}
-                      <button
-                        onClick={() => removePendingFile(pf.id)}
-                        className="absolute top-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <X size={10} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
+            {/* Input */}
+            {!isDraftStart && (
+              <div className="px-5 py-3 shrink-0">
+                {renderComposer()}
               </div>
             )}
-
-            {/* Input */}
-            <div className="px-5 py-3 border-t border-light-border shrink-0">
-              <div className="max-w-3xl mx-auto flex items-end gap-2">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={sending}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-light-border text-light-text-secondary hover:text-accent-blue hover:border-accent-blue/30 transition-colors disabled:opacity-50"
-                  title="上传附件（图片/文件）"
-                >
-                  <Paperclip size={16} />
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  onChange={handleFileSelect}
-                  className="hidden"
-                />
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={e => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onPaste={handlePaste}
-                  placeholder="输入消息..."
-                  rows={1}
-                  className="flex-1 w-full rounded-xl border border-light-border bg-light-card px-4 py-2.5 text-sm text-light-text outline-none focus:border-accent-blue placeholder:text-light-text-secondary resize-none max-h-32"
-                  style={{ minHeight: '40px' }}
-                  disabled={sending}
-                />
-                <button
-                  onClick={handleSend}
-                  disabled={!hasContent || sending}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-blue text-white hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-                </button>
-              </div>
-            </div>
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-light-text-secondary">
+          <div className="relative flex-1 flex flex-col items-center justify-center text-light-text-secondary">
+            <IconButton
+              label="展开菜单"
+              onClick={openMobileSidebar}
+              size="md"
+              surface="plain"
+              className="absolute left-3 top-3 lg:hidden"
+            >
+              <Menu size={20} />
+            </IconButton>
             <MessageSquare size={48} className="mb-4 opacity-20" />
             <p className="text-sm mb-4">选择一个会话或创建新会话</p>
             <button
-              onClick={handleNewSession}
+              onClick={() => createDraftSession()}
               className="flex items-center gap-2 rounded-lg bg-accent-blue px-4 py-2 text-sm font-medium text-white hover:bg-accent-blue/90 transition-colors"
             >
               <Plus size={16} />
@@ -923,63 +1065,12 @@ export default function Chat() {
         )}
       </div>
 
-      {/* New session modal */}
-      {showNewSession && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="rounded-xl bg-light-card border border-light-border max-w-md w-full mx-4 shadow-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-light-border">
-              <h3 className="text-base font-semibold text-light-text">选择 Agent</h3>
-              <button
-                onClick={() => setShowNewSession(false)}
-                className="text-light-text-secondary hover:text-light-text transition-colors text-lg"
-              >
-                ×
-              </button>
-            </div>
-            <div className="px-5 py-4">
-              {agentsLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 size={24} className="animate-spin text-accent-blue" />
-                </div>
-              ) : agents.length === 0 ? (
-                <div className="text-center py-8 text-sm text-light-text-secondary">
-                  暂无可用 Agent
-                </div>
-              ) : (
-                <div className="space-y-2 max-h-80 overflow-y-auto">
-                  {agents.map(agent => (
-                    <button
-                      key={agent.id}
-                      onClick={() => startNewSession(agent.id)}
-                      className="w-full flex items-center gap-3 rounded-xl border border-light-border p-3 text-left hover:bg-light-bg/50 hover:border-accent-blue/30 transition-colors group"
-                    >
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-blue/10 text-lg">
-                        {agent.identity?.emoji || '🤖'}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-light-text truncate">
-                            {agent.identity?.name || agent.name || agent.id}
-                          </span>
-                          {agent.id === defaultAgentId && (
-                            <span className="rounded-full bg-accent-blue/10 px-2 py-0.5 text-[10px] text-accent-blue font-medium shrink-0">
-                              默认
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-light-text-secondary truncate mt-0.5">
-                          {agent.id}
-                        </div>
-                      </div>
-                      <ChevronRight size={14} className="text-light-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <AgentCreatePanel
+        open={agentCreateOpen}
+        onClose={() => setAgentCreateOpen(false)}
+        onCreated={handleAgentCreated}
+      />
+
     </div>
   )
 }

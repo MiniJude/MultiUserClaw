@@ -1,58 +1,656 @@
-import { NavLink, Outlet } from 'react-router-dom'
-import { useState, useEffect } from 'react'
-import { MessageSquare, Smartphone, LogOut } from 'lucide-react'
-import { getMe, logout } from '../lib/api.ts'
-import type { AuthUser } from '../lib/api.ts'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Check,
+  Clock3,
+  Copy,
+  Bot,
+  ChevronRight,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Maximize2,
+  MoreHorizontal,
+  Minimize2,
+  Pencil,
+  Plus,
+  Settings as SettingsIcon,
+  Trash2,
+  X,
+} from 'lucide-react'
+import UserAvatar from './UserAvatar.tsx'
+import ClearableInput from './ui/ClearableInput.tsx'
+import IconButton from './ui/IconButton.tsx'
+import Popconfirm from './ui/Popconfirm.tsx'
+import {
+  deleteSession,
+  getMe,
+  listAgents,
+  listSessions,
+  logout,
+  updateSessionTitle,
+} from '../lib/api.ts'
+import type { AgentInfo, AuthUser, Session } from '../lib/api.ts'
+
+export type LayoutOutletContext = {
+  user: AuthUser | null
+  refreshSessions: () => Promise<void>
+  openMobileSidebar: () => void
+}
+
+type ContextMenuState = {
+  x: number
+  y: number
+  session: Session
+} | null
+
+type AgentMenuState = {
+  x: number
+  y: number
+  agentId: string
+} | null
+
+const primaryNav = [
+  { to: '/chat', label: '新对话', icon: Pencil },
+  { to: '/dashboard', label: '工作台', icon: LayoutDashboard },
+  { to: '/settings', label: '设置', icon: SettingsIcon },
+]
+
+const retiredBuiltInAgentIds = new Set(['manager', 'programmer', 'researcher', 'hr', 'doctor'])
+
+function getSessionTitle(session: Session): string {
+  return session.title?.trim() || session.key.split(':').pop() || session.key
+}
+
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return ''
+  const diffMs = Date.now() - new Date(iso).getTime()
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diffMs < hour) return `${Math.max(1, Math.round(diffMs / minute))} 分`
+  if (diffMs < day) return `${Math.round(diffMs / hour)} 小时`
+  return `${Math.round(diffMs / day)} 天`
+}
+
+function getAgentIdFromKey(key: string): string {
+  const parts = key.split(':')
+  if (parts.length >= 2 && parts[0] === 'agent') return parts[1]
+  return 'main'
+}
+
+async function copyText(value: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value)
+    return
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = value
+    textarea.style.position = 'fixed'
+    textarea.style.left = '-9999px'
+    textarea.style.top = '0'
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+  }
+}
 
 export default function Layout() {
+  const navigate = useNavigate()
+  const location = useLocation()
   const [user, setUser] = useState<AuthUser | null>(null)
+  const [agents, setAgents] = useState<AgentInfo[]>([])
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(true)
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null)
+  const [agentMenu, setAgentMenu] = useState<AgentMenuState>(null)
+  const [renamingKey, setRenamingKey] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [agentsFolderOpen, setAgentsFolderOpen] = useState(true)
+  const [ordinaryFolderOpen, setOrdinaryFolderOpen] = useState(true)
+  const [collapsedAgents, setCollapsedAgents] = useState<Record<string, boolean>>({})
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+
+  const activeSessionKey = useMemo(() => {
+    const params = new URLSearchParams(location.search)
+    return params.get('session')
+  }, [location.search])
+
+  const refreshSessions = useCallback(async () => {
+    setSessionsLoading(true)
+    try {
+      const result = await listSessions()
+      setSessions(result)
+    } catch {
+      setSessions([])
+    } finally {
+      setSessionsLoading(false)
+    }
+  }, [])
+
+  const refreshAgents = useCallback(async () => {
+    try {
+      const result = await listAgents()
+      setAgents(result.agents || [])
+    } catch {
+      setAgents([])
+    }
+  }, [])
 
   useEffect(() => {
     getMe().then(setUser).catch(() => {})
+    void refreshAgents()
+    void refreshSessions()
+  }, [refreshAgents, refreshSessions])
+
+  useEffect(() => {
+    const closeMenu = () => {
+      setContextMenu(null)
+      setAgentMenu(null)
+    }
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('keydown', closeMenu)
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('keydown', closeMenu)
+    }
   }, [])
 
-  const linkClass = ({ isActive }: { isActive: boolean }) =>
-    `flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-      isActive
-        ? 'bg-accent-blue/15 text-accent-blue'
-        : 'text-light-text-secondary hover:text-light-text hover:bg-light-card'
-    }`
+  useEffect(() => {
+    setMobileSidebarOpen(false)
+  }, [location.pathname, location.search])
+
+  const agentGroups = useMemo(() => {
+    const sorted = [...sessions].sort(
+      (a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime(),
+    )
+    const sessionsByAgent = new Map<string, Session[]>()
+    sorted.forEach(session => {
+      const agentId = getAgentIdFromKey(session.key)
+      sessionsByAgent.set(agentId, [...(sessionsByAgent.get(agentId) || []), session])
+    })
+
+    const agentIds = new Set<string>(
+      agents
+        .map(agent => agent.id)
+        .filter(agentId => agentId !== 'main'),
+    )
+    sessionsByAgent.forEach((_value, agentId) => {
+      if (!retiredBuiltInAgentIds.has(agentId)) {
+        agentIds.add(agentId)
+      }
+    })
+    agentIds.delete('main')
+
+    return Array.from(agentIds)
+      .map(agentId => {
+        const agent = agents.find(item => item.id === agentId)
+        return {
+          id: agentId,
+          label: agent?.identity?.name || agent?.name || (agentId === 'main' ? '默认 Agent' : agentId),
+          sessions: sessionsByAgent.get(agentId) || [],
+        }
+      })
+  }, [agents, sessions])
+
+  const ordinarySessions = useMemo(
+    () =>
+      [...sessions]
+        .filter(session => getAgentIdFromKey(session.key) === 'main')
+        .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()),
+    [sessions],
+  )
+
+  const allAgentsCollapsed = agentGroups.length > 0 && agentGroups.every(group => collapsedAgents[group.id])
+
+  const toggleAllAgents = () => {
+    if (allAgentsCollapsed) {
+      setAgentsFolderOpen(true)
+      setCollapsedAgents({})
+      return
+    }
+    setAgentsFolderOpen(true)
+    setCollapsedAgents(Object.fromEntries(agentGroups.map(group => [group.id, true])))
+  }
+
+  const startAgentSession = (agentId: string) => {
+    setAgentMenu(null)
+    setMobileSidebarOpen(false)
+    navigate(`/chat?new=1&agent=${encodeURIComponent(agentId)}`)
+  }
+
+  const startRename = (session: Session) => {
+    setRenamingKey(session.key)
+    setRenameValue(getSessionTitle(session))
+    setContextMenu(null)
+  }
+
+  const saveRename = async (key: string) => {
+    await updateSessionTitle(key, renameValue)
+    setRenamingKey(null)
+    setRenameValue('')
+    await refreshSessions()
+  }
+
+  const copySessionId = async (key: string) => {
+    await copyText(key)
+    setCopiedKey(key)
+    setContextMenu(null)
+    window.setTimeout(() => setCopiedKey(null), 1600)
+  }
+
+  const removeSession = async (session: Session) => {
+    setContextMenu(null)
+    await deleteSession(session.key)
+    await refreshSessions()
+    if (activeSessionKey === session.key) {
+      navigate('/chat')
+    }
+  }
+
+  const handleLogout = () => {
+    logout()
+  }
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="flex items-center justify-between border-b border-light-border bg-light-sidebar px-4 py-2 shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <img src="/openclaw-logo.webp" alt="OpenClaw" className="h-7 w-7 rounded-md" />
-            <span className="text-sm font-semibold text-light-text">OpenClaw Lite</span>
+    <div className="flex h-screen overflow-hidden bg-light-bg text-light-text">
+      {location.pathname !== '/chat' && (
+        <IconButton
+          label="展开菜单"
+          onClick={() => setMobileSidebarOpen(true)}
+          size="md"
+          surface="plain"
+          className="fixed left-3 top-3 z-30 bg-light-card/80 shadow-sm backdrop-blur lg:hidden"
+        >
+          <Menu size={20} />
+        </IconButton>
+      )}
+
+      <button
+        type="button"
+        aria-label="关闭菜单"
+        onClick={() => setMobileSidebarOpen(false)}
+        className={`mobile-sidebar-backdrop fixed inset-0 z-40 bg-slate-950/40 backdrop-blur-[1px] lg:hidden ${
+          mobileSidebarOpen ? 'is-open' : ''
+        }`}
+      />
+
+      <aside
+        className={`app-sidebar fixed inset-y-0 left-0 z-50 flex w-[82vw] max-w-[380px] shrink-0 flex-col border-r border-light-border bg-light-sidebar px-3 py-3 shadow-2xl shadow-slate-950/20 lg:relative lg:z-auto lg:w-[284px] lg:translate-x-0 lg:shadow-none ${
+          mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <nav className="space-y-1">
+          {primaryNav.map(item => (
+            <NavLink
+              key={`${item.to}-${item.label}`}
+              to={item.label === '新对话' ? '/chat?new=1' : item.to}
+              className={({ isActive }) =>
+                `flex cursor-pointer items-center gap-3 rounded-xl px-2.5 py-2 text-sm transition-colors ${
+                  isActive && item.label !== '新对话'
+                    ? 'bg-light-card text-light-text shadow-sm'
+                    : 'text-light-text-secondary hover:bg-light-card/70 hover:text-light-text'
+                }`
+              }
+              onClick={() => setMobileSidebarOpen(false)}
+            >
+              <item.icon size={17} />
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="mt-7 flex min-h-0 flex-1 flex-col">
+          <div className="mb-2 flex items-center justify-between px-2 text-xs text-slate-500">
+            <button
+              onClick={() => setAgentsFolderOpen(value => !value)}
+              className="flex cursor-pointer items-center gap-1 rounded-md text-xs transition-colors hover:text-light-text"
+            >
+              <span>Agent 对话</span>
+              <ChevronRight
+                size={13}
+                className={`sidebar-chevron ${agentsFolderOpen ? 'is-open' : ''}`}
+              />
+            </button>
+            <IconButton
+              label={allAgentsCollapsed ? '全部展开' : '全部收起'}
+              onClick={toggleAllAgents}
+              size="md"
+              surface="plain"
+              className="h-7 w-7"
+            >
+              {allAgentsCollapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+            </IconButton>
           </div>
-          <nav className="flex items-center gap-1">
-            <NavLink to="/" end className={linkClass}>
-              <MessageSquare size={15} />
-              对话
-            </NavLink>
-            <NavLink to="/wechat" className={linkClass}>
-              <Smartphone size={15} />
-              微信渠道
-            </NavLink>
-          </nav>
+
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {sessionsLoading ? (
+              <div className="flex items-center gap-2 px-2 py-3 text-xs text-slate-500">
+                <Clock3 size={13} className="animate-spin" />
+                加载会话中
+              </div>
+            ) : (
+              <>
+                <div className={`sidebar-collapse ${agentsFolderOpen ? 'is-open' : ''}`}>
+                  <div>
+                    {agentGroups.length === 0 ? (
+                      <div className="px-2 py-3 text-xs text-slate-500">暂无 Agent 对话</div>
+                    ) : (
+                      agentGroups.map(group => (
+                <section key={group.id}>
+                  <div className="group/agent flex items-center gap-1 rounded-xl px-2 py-1.5 text-sm text-light-text-secondary hover:bg-light-card/60">
+                    <button
+                      onClick={() =>
+                        setCollapsedAgents(prev => ({ ...prev, [group.id]: !prev[group.id] }))
+                      }
+                      className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
+                    >
+                      <ChevronRight
+                        size={14}
+                        className={`sidebar-chevron ${collapsedAgents[group.id] ? '' : 'is-open'}`}
+                      />
+                      <Bot size={16} />
+                      <span className="truncate">{group.label}</span>
+                    </button>
+                    <IconButton
+                      label={`新建 ${group.label} 对话`}
+                      onClick={() => startAgentSession(group.id)}
+                      size="sm"
+                      surface="plain"
+                      className="opacity-0 group-hover/agent:opacity-100"
+                    >
+                      <Plus size={14} />
+                    </IconButton>
+                    <IconButton
+                      label={`${group.label} 更多操作`}
+                      onClick={event => {
+                        event.stopPropagation()
+                        setContextMenu(null)
+                        setAgentMenu({ x: event.clientX, y: event.clientY, agentId: group.id })
+                      }}
+                      size="sm"
+                      surface="plain"
+                      className="opacity-0 group-hover/agent:opacity-100"
+                    >
+                      <MoreHorizontal size={15} />
+                    </IconButton>
+                  </div>
+                  <div className={`sidebar-collapse ${collapsedAgents[group.id] ? '' : 'is-open'}`}>
+                    <div className="space-y-0.5 pl-6">
+                      {group.sessions.slice(0, 6).map(session => {
+                        const isActive = activeSessionKey === session.key
+                        const isRenaming = renamingKey === session.key
+                        return (
+                          <div
+                            key={session.key}
+                            onContextMenu={event => {
+                              event.preventDefault()
+                              setContextMenu({ x: event.clientX, y: event.clientY, session })
+                            }}
+                            className={`group flex items-center gap-2 rounded-xl px-2 py-1.5 transition-colors ${
+                              isActive ? 'bg-light-card text-light-text shadow-sm' : 'text-light-text-secondary hover:bg-light-card/70 hover:text-light-text'
+                            }`}
+                          >
+                            {isRenaming ? (
+                              <div className="flex min-w-0 flex-1 items-center gap-1">
+                                <ClearableInput
+                                  value={renameValue}
+                                  onValueChange={setRenameValue}
+                                  onKeyDown={event => {
+                                    if (event.key === 'Enter') void saveRename(session.key)
+                                    if (event.key === 'Escape') setRenamingKey(null)
+                                  }}
+                                  className="min-w-0 flex-1 rounded-lg border border-accent-blue/30 bg-white px-2 py-1 text-xs outline-none"
+                                  autoFocus
+                                  clearLabel="清空标题"
+                                />
+                                <IconButton
+                                  label="保存标题"
+                                  onClick={() => void saveRename(session.key)}
+                                  size="sm"
+                                  tone="primary"
+                                >
+                                  <Check size={13} />
+                                </IconButton>
+                                <IconButton
+                                  label="取消重命名"
+                                  onClick={() => setRenamingKey(null)}
+                                  size="sm"
+                                >
+                                  <X size={13} />
+                                </IconButton>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  setMobileSidebarOpen(false)
+                                  navigate(`/chat?session=${encodeURIComponent(session.key)}`)
+                                }}
+                                className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
+                              >
+                                <span className="truncate text-sm">{getSessionTitle(session)}</span>
+                                <span className="ml-auto shrink-0 text-xs text-slate-400">
+                                  {copiedKey === session.key ? '已复制' : formatRelativeTime(session.updated_at)}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                      {group.sessions.length > 6 && (
+                        <button className="cursor-pointer px-2 py-1 text-sm text-slate-500 hover:text-light-text">
+                          展开显示
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </section>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div className={`sidebar-collapse ${agentsFolderOpen ? '' : 'is-open'}`}>
+                  <div className="px-2 py-3 text-xs text-slate-500">
+                    已收起 {agentGroups.length} 个 Agent
+                  </div>
+                </div>
+              </>
+            )}
+
+            <section className="mt-5 border-t border-slate-200/70 pt-4">
+              <div className="mb-2 flex items-center justify-between px-2 text-xs text-slate-500">
+                <button
+                  onClick={() => setOrdinaryFolderOpen(value => !value)}
+                  className="flex cursor-pointer items-center gap-1 rounded-md text-xs transition-colors hover:text-light-text"
+                >
+                  <span>对话</span>
+                  <ChevronRight
+                    size={13}
+                    className={`sidebar-chevron ${ordinaryFolderOpen ? 'is-open' : ''}`}
+                  />
+                </button>
+                <IconButton
+                  label="新建普通对话"
+                  onClick={() => startAgentSession('main')}
+                  size="sm"
+                  surface="plain"
+                >
+                  <Pencil size={14} />
+                </IconButton>
+              </div>
+
+              <div className={`sidebar-collapse ${ordinaryFolderOpen ? 'is-open' : ''}`}>
+                <div className="space-y-0.5">
+                  {ordinarySessions.length === 0 ? (
+                    <div className="px-2 py-1 text-xs text-slate-400">暂无普通对话</div>
+                  ) : ordinarySessions.slice(0, 8).map(session => {
+                    const isActive = activeSessionKey === session.key
+                    const isRenaming = renamingKey === session.key
+                    return (
+                      <div
+                        key={session.key}
+                        onContextMenu={event => {
+                          event.preventDefault()
+                          setContextMenu({ x: event.clientX, y: event.clientY, session })
+                        }}
+                        className={`group flex items-center gap-2 rounded-xl px-2 py-1.5 transition-colors ${
+                            isActive ? 'bg-light-card text-light-text shadow-sm' : 'text-light-text-secondary hover:bg-light-card/70 hover:text-light-text'
+                        }`}
+                      >
+                        {isRenaming ? (
+                          <div className="flex min-w-0 flex-1 items-center gap-1">
+                            <ClearableInput
+                              value={renameValue}
+                              onValueChange={setRenameValue}
+                              onKeyDown={event => {
+                                if (event.key === 'Enter') void saveRename(session.key)
+                                if (event.key === 'Escape') setRenamingKey(null)
+                              }}
+                              className="min-w-0 flex-1 rounded-lg border border-accent-blue/30 bg-white px-2 py-1 text-xs outline-none"
+                              autoFocus
+                              clearLabel="清空标题"
+                            />
+                            <IconButton
+                              label="保存标题"
+                              onClick={() => void saveRename(session.key)}
+                              size="sm"
+                              tone="primary"
+                            >
+                              <Check size={13} />
+                            </IconButton>
+                            <IconButton
+                              label="取消重命名"
+                              onClick={() => setRenamingKey(null)}
+                              size="sm"
+                            >
+                              <X size={13} />
+                            </IconButton>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setMobileSidebarOpen(false)
+                              navigate(`/chat?session=${encodeURIComponent(session.key)}`)
+                            }}
+                            className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
+                          >
+                            <span className="truncate text-sm">{getSessionTitle(session)}</span>
+                            <span className="ml-auto shrink-0 text-xs text-slate-400">
+                              {copiedKey === session.key ? '已复制' : formatRelativeTime(session.updated_at)}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {ordinarySessions.length > 8 && (
+                    <button className="cursor-pointer px-2 py-1 text-sm text-slate-500 hover:text-light-text">
+                      展开显示
+                    </button>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          {user && (
-            <span className="text-xs text-light-text-secondary">{user.username}</span>
-          )}
+
+        <div className="mt-3 flex items-center justify-between rounded-xl px-2 py-2 text-slate-700">
+          <div className="min-w-0 text-xs text-slate-500">
+            <div className="truncate text-sm text-slate-700">{user?.username || '当前用户'}</div>
+            <div className="truncate">{user?.email || 'OpenClaw Lite'}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <UserAvatar user={user} />
+            <Popconfirm
+              title="退出登录？"
+              description="本地登录状态会被清除，需要重新登录后继续使用。"
+              confirmText="退出"
+              danger
+              onConfirm={handleLogout}
+            >
+              <IconButton label="退出登录" tone="danger" className="hover:bg-white/70">
+                <LogOut size={16} />
+              </IconButton>
+            </Popconfirm>
+          </div>
+        </div>
+      </aside>
+
+      <main className="min-w-0 flex-1 overflow-hidden bg-light-bg">
+        <Outlet
+          context={{
+            user,
+            refreshSessions,
+            openMobileSidebar: () => setMobileSidebarOpen(true),
+          } satisfies LayoutOutletContext}
+        />
+      </main>
+
+      {contextMenu && (
+        <div
+          className="fixed z-50 w-48 rounded-xl border border-light-border bg-white p-1 shadow-xl shadow-slate-200/80"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={event => event.stopPropagation()}
+        >
           <button
-            onClick={logout}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-light-text-secondary hover:text-accent-red transition-colors"
+            onClick={() => startRename(contextMenu.session)}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
           >
-            <LogOut size={14} />
-            退出
+            <Pencil size={15} />
+            Rename
+          </button>
+          <button
+            onClick={() => void copySessionId(contextMenu.session.key)}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
+          >
+            <Copy size={15} />
+            Copy session ID
+          </button>
+          <Popconfirm
+            title="删除这个会话？"
+            description={`会话“${getSessionTitle(contextMenu.session)}”将被删除，此操作不可恢复。`}
+            confirmText="删除"
+            danger
+            onConfirm={() => void removeSession(contextMenu.session)}
+          >
+            <button
+              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-accent-red transition-colors hover:bg-accent-red/10"
+            >
+              <Trash2 size={15} />
+              Delete
+            </button>
+          </Popconfirm>
+        </div>
+      )}
+
+      {agentMenu && (
+        <div
+          className="fixed z-50 w-48 rounded-xl border border-light-border bg-white p-1 shadow-xl shadow-slate-200/80"
+          style={{ left: agentMenu.x, top: agentMenu.y }}
+          onClick={event => event.stopPropagation()}
+        >
+          <button
+            onClick={() => startAgentSession(agentMenu.agentId)}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
+          >
+            <Plus size={15} />
+            New conversation
+          </button>
+          <button
+            onClick={() => {
+              void copyText(agentMenu.agentId)
+              setAgentMenu(null)
+            }}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
+          >
+            <Copy size={15} />
+            Copy Agent ID
           </button>
         </div>
-      </header>
-      <main className="flex-1 overflow-hidden">
-        <Outlet />
-      </main>
+      )}
     </div>
   )
 }
