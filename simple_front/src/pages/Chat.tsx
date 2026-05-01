@@ -76,6 +76,15 @@ function normalizeSessionKey(key: string): string {
   return key.replace(/:/g, '')
 }
 
+const retiredBuiltInAgentIds = new Set(['manager', 'programmer', 'researcher', 'hr', 'doctor'])
+const agentDescriptions: Record<string, string> = {
+  'daily-assistant': '整理待办、规划下一步、跟进日常事项',
+  'web-operator': '处理网页访问、表单、截图和在线流程',
+  'slide-maker': '制作、改造和检查汇报演示材料',
+  'research-scout': '调研公开信息，筛选来源并整理结论',
+  'writing-desk': '撰写邮件、方案、纪要、文案和润色稿',
+}
+
 export default function Chat() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { user, refreshSessions, openMobileSidebar } = useOutletContext<LayoutOutletContext>()
@@ -686,7 +695,8 @@ export default function Chat() {
       name: '普通对话',
       identity: { name: '普通对话' },
     }
-    return hasMain ? agents : [mainAgent, ...agents]
+    const visibleAgents = agents.filter(agent => !retiredBuiltInAgentIds.has(agent.id))
+    return hasMain ? visibleAgents : [mainAgent, ...visibleAgents]
   }, [agents])
   const currentAgentId = activeSessionKey ? getAgentIdFromKey(activeSessionKey) : draftAgentId
   const selectedAgent = currentAgentId ? agentOptions.find(agent => agent.id === currentAgentId) : null
@@ -764,6 +774,7 @@ export default function Chat() {
           <div className="px-2 py-4 text-center text-xs text-light-text-secondary">没有匹配的 Agent</div>
         ) : filteredAgents.map(agent => {
           const label = agent.identity?.name || agent.name || agent.id
+          const description = agentDescriptions[agent.id] || '专属任务助手'
           const selected = Boolean(draftAgentId) && agent.id === draftAgentId
           return (
             <button
@@ -774,7 +785,7 @@ export default function Chat() {
               <Bot size={16} className="text-accent-blue" />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-light-text">{label}</div>
-                <div className="truncate text-xs text-light-text-secondary">{agent.id}</div>
+                <div className="truncate text-xs text-light-text-secondary">{description}</div>
               </div>
               {selected && <Check size={15} className="text-accent-blue" />}
             </button>

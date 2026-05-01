@@ -19,6 +19,7 @@ const builtInAgentIds = new Set([
   'research-scout',
   'writing-desk',
 ])
+const retiredBuiltInAgentIds = new Set(['manager', 'programmer', 'researcher', 'hr', 'doctor'])
 
 const agentMeta: Record<string, { description: string; icon: typeof Bot }> = {
   'daily-assistant': {
@@ -59,7 +60,9 @@ export default function Dashboard() {
   }, [])
 
   const builtInAgents = agents.filter(agent => builtInAgentIds.has(agent.id))
-  const customAgents = agents.filter(agent => !builtInAgentIds.has(agent.id) && agent.id !== 'main')
+  const customAgents = agents.filter(
+    agent => !builtInAgentIds.has(agent.id) && !retiredBuiltInAgentIds.has(agent.id) && agent.id !== 'main',
+  )
 
   return (
     <div className="h-full overflow-y-auto bg-light-bg">

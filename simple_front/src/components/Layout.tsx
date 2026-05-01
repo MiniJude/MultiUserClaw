@@ -176,6 +176,7 @@ export default function Layout() {
     const agentIds = new Set<string>(
       agents
         .map(agent => agent.id)
+        .filter(agentId => !retiredBuiltInAgentIds.has(agentId))
         .filter(agentId => agentId !== 'main'),
     )
     sessionsByAgent.forEach((_value, agentId) => {
