@@ -25,16 +25,6 @@ interface OpenclawChatHistoryResult {
   [key: string]: unknown;
 }
 
-function compactFallbackTitle(message: string): string {
-  const compact = message
-    .replace(/[*_`#>\[\]()]/g, "")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!compact) return "新对话";
-  return Array.from(compact).slice(0, 24).join("");
-}
-
 function normalizeGeneratedTitle(value: string): string {
   const firstLine = value
     .split(/\r?\n/)
@@ -49,8 +39,10 @@ function normalizeGeneratedTitle(value: string): string {
   return Array.from(cleaned).slice(0, 24).join("");
 }
 
+const sessionsWithTitleGenerationStarted = new Set<string>();
+
 async function generateSessionTitle(message: string): Promise<string> {
-  const fallback = compactFallbackTitle(message);
+  const fallback = "新对话";
   const config = loadConfig();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
@@ -73,8 +65,9 @@ async function generateSessionTitle(message: string): Promise<string> {
             content: [
               "你是对话标题生成器。",
               "请只根据用户第一条消息概括其真实意图和要求。",
-              "输出一个中文短标题，8到18个汉字为宜，最多24个汉字。",
+              "输出一个中文短标题，8到16个汉字为宜，最多24个汉字。",
               "不要使用引号、句号、编号、解释、Markdown。",
+              "不要照抄用户原文，要提炼问题主题。",
               "不要根据助手回答内容生成标题。",
               "如果用户只是在询问某个助手能做什么，也要说明具体对象，例如“询问演示文稿助手能力”。",
             ].join("\n"),
@@ -98,6 +91,31 @@ async function generateSessionTitle(message: string): Promise<string> {
   }
 }
 
+function hasStoredSessionTitle(row: OpenclawSessionRow | undefined): boolean {
+  if (!row) return false;
+  const displayName = typeof row.displayName === "string" && row.displayName !== "OpenClaw Bridge"
+    ? cleanSessionTitle(row.displayName)
+    : "";
+  const label = typeof row.label === "string" ? cleanSessionTitle(row.label) : "";
+  const derivedTitle = typeof row.derivedTitle === "string" ? cleanSessionTitle(row.derivedTitle) : "";
+  return Boolean(displayName || label || derivedTitle);
+}
+
+async function shouldCreateFirstQuestionTitle(params: {
+  client: BridgeGatewayClient;
+  key: string;
+}): Promise<boolean> {
+  if (sessionsWithTitleGenerationStarted.has(params.key)) return false;
+
+  const sessionRow = await params.client.request<OpenclawSessionsListResult>("sessions.list", {
+    includeDerivedTitles: true,
+  })
+    .then((result) => (result.sessions || []).find((s) => toOpenclawSessionKey(String(s.key)) === params.key))
+    .catch(() => undefined);
+
+  return !hasStoredSessionTitle(sessionRow);
+}
+
 /** Convert "agent:programmer:session-1773503840989" → "programmer 会话" */
 function friendlySessionKey(key: string): string {
   const parts = key.split(":");
@@ -116,7 +134,6 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
   router.get("/sessions", asyncHandler(async (_req, res) => {
     try {
       const result = await client.request<OpenclawSessionsListResult>("sessions.list", {
-        includeLastMessage: true,
         includeDerivedTitles: true,
       });
 
@@ -125,16 +142,12 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
         const dn = s.displayName && s.displayName !== "OpenClaw Bridge" ? s.displayName : "";
         const rawTitle = String(dn || s.derivedTitle || "");
         const cleaned = cleanSessionTitle(rawTitle);
-        // If title was all metadata (cleaned to empty), try lastMessagePreview as fallback
-        const lastPreview = typeof s.lastMessagePreview === "string"
-          ? cleanSessionTitle(s.lastMessagePreview)
-          : "";
         const key = toNanobotSessionId(s.key);
         return {
           key,
           created_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
           updated_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
-          title: cleaned || lastPreview || friendlySessionKey(key),
+          title: cleaned || friendlySessionKey(key),
         };
       });
 
@@ -194,7 +207,6 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
   router.post("/sessions/:key(*)/messages", asyncHandler(async (req, res) => {
     const key = toOpenclawSessionKey(req.params.key);
     const { message } = req.body;
-    const titleSource = typeof req.body?.titleSource === "string" ? req.body.titleSource.trim() : "";
 
     if (!message || typeof message !== "string") {
       res.status(400).json({ detail: "message is required" });
@@ -202,10 +214,6 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
     }
 
     try {
-      const historyPromise = client.request<OpenclawChatHistoryResult>("chat.history", {
-        sessionKey: key,
-        limit: 5,
-      }).catch(() => ({ messages: [] }));
       const params: Record<string, unknown> = {
         sessionKey: key,
         message,
@@ -213,22 +221,39 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
         idempotencyKey: randomUUID(),
       };
 
-      const history = await historyPromise;
-      const hasExistingUserMessage = (history.messages || []).some((m) => m.role === "user");
-      const titlePromise = hasExistingUserMessage ? Promise.resolve<string | null>(null) : generateSessionTitle(titleSource || message);
-      const [result, title] = await Promise.all([
-        client.request<Record<string, unknown>>("chat.send", params),
-        titlePromise,
-      ]);
+      const result = await client.request<Record<string, unknown>>("chat.send", params);
 
-      if (title) {
-        await client.request("sessions.patch", {
-          key,
-          label: title,
-        }).catch(() => {});
+      res.json({ ok: true, runId: result.runId || null, title: null });
+    } catch (err) {
+      res.status(500).json({ detail: (err as Error).message });
+    }
+  }));
+
+  // POST /api/sessions/:key/title-summary — summarize the first user question into a fixed title
+  router.post("/sessions/:key(*)/title-summary", asyncHandler(async (req, res) => {
+    const key = toOpenclawSessionKey(req.params.key);
+    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+
+    if (!message) {
+      res.status(400).json({ detail: "message is required" });
+      return;
+    }
+
+    try {
+      const shouldGenerateTitle = await shouldCreateFirstQuestionTitle({ client, key });
+      if (!shouldGenerateTitle) {
+        res.json({ ok: true, key: toNanobotSessionId(key), title: null });
+        return;
       }
 
-      res.json({ ok: true, runId: result.runId || null, title });
+      sessionsWithTitleGenerationStarted.add(key);
+      const title = await generateSessionTitle(message);
+      await client.request("sessions.patch", {
+        key,
+        label: title,
+      }).catch(() => {});
+
+      res.json({ ok: true, key: toNanobotSessionId(key), title });
     } catch (err) {
       res.status(500).json({ detail: (err as Error).message });
     }

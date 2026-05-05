@@ -4,6 +4,7 @@ import Login from './pages/Login.tsx'
 import Dashboard from './pages/Dashboard.tsx'
 import Chat from './pages/Chat.tsx'
 import Settings from './pages/Settings.tsx'
+import KnowledgeBase from './pages/KnowledgeBase.tsx'
 import { isLoggedIn } from './lib/api.ts'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -18,6 +19,8 @@ export default function App() {
       <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
+        <Route path="dashboard/knowledge" element={<Navigate to="/knowledge" replace />} />
+        <Route path="knowledge" element={<KnowledgeBase />} />
         <Route path="settings" element={<Settings />} />
         <Route path="chat" element={<Chat />} />
       </Route>

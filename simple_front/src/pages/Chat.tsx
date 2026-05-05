@@ -32,6 +32,7 @@ import {
   abortActiveSessionRun,
   getAccessToken,
   uploadFileToWorkspace,
+  generateSessionTitle,
 } from '../lib/api.ts'
 import type { Session, SessionDetail, AgentInfo } from '../lib/api.ts'
 
@@ -77,9 +78,7 @@ function normalizeSessionKey(key: string): string {
   return key.replace(/:/g, '')
 }
 
-function buildFallbackTitleFromText(text: string, fileCount = 0): string {
-  const compact = text.replace(/\s+/g, ' ').trim()
-  if (compact) return Array.from(compact).slice(0, 24).join('')
+function buildFallbackTitleFromText(fileCount = 0): string {
   if (fileCount > 0) return fileCount === 1 ? '处理附件' : `处理 ${fileCount} 个附件`
   return '新对话'
 }
@@ -87,7 +86,7 @@ function buildFallbackTitleFromText(text: string, fileCount = 0): string {
 function buildTitleFromMessages(messages: SessionDetail['messages']): string {
   const firstUserMessage = messages.find(msg => msg.role === 'user' && msg.content.trim())
   if (!firstUserMessage) return ''
-  return buildFallbackTitleFromText(firstUserMessage.content)
+  return buildFallbackTitleFromText()
 }
 
 function hasAssistantAfterLastUser(messages: SessionDetail['messages']): boolean {
@@ -635,10 +634,11 @@ export default function Chat() {
     const sendingSessionKey = activeSessionKeyRef.current || `agent:${requestedAgentId || 'main'}:session-${Date.now()}`
     if (sendingBySession[sendingSessionKey]) return
     abortedSessionRef.current[sendingSessionKey] = false
+    const isFirstTurn = !activeSessionKeyRef.current
     let firstTurnTitle = ''
-    if (!activeSessionKeyRef.current) {
+    if (isFirstTurn) {
       const now = new Date().toISOString()
-      firstTurnTitle = buildFallbackTitleFromText(text, pendingFiles.length)
+      firstTurnTitle = pendingFiles.length > 0 && !text ? buildFallbackTitleFromText(pendingFiles.length) : '新对话'
       const optimisticSession: Session = {
         key: sendingSessionKey,
         title: firstTurnTitle,
@@ -705,17 +705,22 @@ export default function Chat() {
       setPendingFiles([])
 
       clearStreamingText(sendingSessionKey)
-      const titleSource = text || pendingFiles.map(file => file.name).join(' ')
-      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage, titleSource)
-      if (sendResult.title) {
-        const now = new Date().toISOString()
-        addOptimisticSession({
-          key: sendingSessionKey,
-          title: sendResult.title,
-          created_at: now,
-          updated_at: now,
-        })
-      }
+      const titlePromise = isFirstTurn && text
+        ? generateSessionTitle(sendingSessionKey, text)
+          .then(result => {
+            if (!result.title) return
+            const now = new Date().toISOString()
+            addOptimisticSession({
+              key: sendingSessionKey,
+              title: result.title,
+              created_at: now,
+              updated_at: now,
+            })
+            void refreshSessions({ silent: true, force: true })
+          })
+          .catch(() => {})
+        : Promise.resolve()
+      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage)
       setRunIdForSession(sendingSessionKey, sendResult.runId)
       if (abortedSessionRef.current[sendingSessionKey]) {
         if (sendResult.runId) {
@@ -725,6 +730,7 @@ export default function Chat() {
         }
         return
       }
+      void titlePromise
       await waitForResponse(sendingSessionKey, sendResult.runId)
       void refreshSessions({ silent: true, force: true })
     } catch (err: any) {
@@ -822,8 +828,8 @@ export default function Chat() {
     const hasMain = agents.some(agent => agent.id === 'main')
     const mainAgent: AgentInfo = {
       id: 'main',
-      name: '普通对话',
-      identity: { name: '普通对话' },
+      name: '默认',
+      identity: { name: '默认' },
     }
     const visibleAgents = agents.filter(agent => !retiredBuiltInAgentIds.has(agent.id))
     return hasMain ? visibleAgents : [mainAgent, ...visibleAgents]
@@ -831,8 +837,8 @@ export default function Chat() {
   const currentAgentId = activeSessionKey ? getAgentIdFromKey(activeSessionKey) : draftAgentId
   const selectedAgent = currentAgentId ? agentOptions.find(agent => agent.id === currentAgentId) : null
   const selectedAgentLabel =
-    currentAgentId === 'main'
-      ? '普通对话'
+    !currentAgentId || currentAgentId === 'main'
+      ? '默认'
       : selectedAgent?.identity?.name || selectedAgent?.name || currentAgentId || '选择 Agent'
   const conversationTitle = isDraftStart
     ? '新对话'
@@ -936,7 +942,7 @@ export default function Chat() {
             className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text"
           >
             <X size={16} />
-            <span>不指定 Agent</span>
+            <span>使用默认</span>
           </button>
         )}
         <button

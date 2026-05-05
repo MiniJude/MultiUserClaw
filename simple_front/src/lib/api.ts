@@ -201,6 +201,34 @@ export interface AgentRunWaitResult {
   error: unknown
 }
 
+export interface FileEntry {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  size: number | null
+  content_type?: string | null
+  modified: string
+}
+
+export interface BrowseDirectoryResult {
+  type: 'directory'
+  path: string
+  root: string
+  items: FileEntry[]
+}
+
+export interface BrowseFileResult {
+  type: 'file'
+  path: string
+  name: string
+  size: number
+  content_type: string
+  modified: string
+  content?: string
+}
+
+export type BrowseResult = BrowseDirectoryResult | BrowseFileResult
+
 // ---------------------------------------------------------------------------
 // Token management
 // ---------------------------------------------------------------------------
@@ -553,6 +581,21 @@ export async function updateSessionTitle(
   return result
 }
 
+export async function generateSessionTitle(
+  key: string,
+  message: string,
+): Promise<{ ok: boolean; key: string; title: string | null }> {
+  const result = await fetchJSON<{ ok: boolean; key: string; title: string | null }>(
+    `/api/openclaw/sessions/${encodeURIComponent(key)}/title-summary`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    },
+  )
+  invalidateSessionsCache()
+  return result
+}
+
 // ---------------------------------------------------------------------------
 // Chat functions
 // ---------------------------------------------------------------------------
@@ -560,13 +603,12 @@ export async function updateSessionTitle(
 export async function sendChatMessage(
   sessionKey: string,
   message: string,
-  titleSource?: string,
 ): Promise<{ ok: boolean; runId: string | null; title?: string | null }> {
   const result = await fetchJSON<{ ok: boolean; runId: string | null; title?: string | null }>(
     `/api/openclaw/sessions/${encodeURIComponent(sessionKey)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify({ message, titleSource }),
+      body: JSON.stringify({ message }),
     },
   )
   invalidateSessionsCache()
@@ -624,4 +666,64 @@ export async function uploadFileToWorkspace(
   }
 
   return res.json() as Promise<{ path: string }>
+}
+
+// ---------------------------------------------------------------------------
+// File manager
+// ---------------------------------------------------------------------------
+
+export async function browseFiles(path = ''): Promise<BrowseResult> {
+  const params = path ? `?path=${encodeURIComponent(path)}` : ''
+  return fetchJSON<BrowseResult>(`/api/openclaw/filemanager/browse${params}`)
+}
+
+export async function uploadFile(file: File, targetDir = ''): Promise<FileEntry> {
+  const token = getAccessToken()
+  const formData = new FormData()
+  formData.append('file', file)
+  if (targetDir) formData.append('path', targetDir)
+
+  const res = await fetch(`${API_URL}/api/openclaw/filemanager/upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  })
+
+  if (!res.ok) {
+    throw new Error(await parseErrorMessage(res))
+  }
+
+  return res.json() as Promise<FileEntry>
+}
+
+export async function deleteFile(path: string): Promise<void> {
+  await fetchJSON<unknown>(`/api/openclaw/filemanager/delete?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function createDirectory(path: string): Promise<void> {
+  await fetchJSON<unknown>(`/api/openclaw/filemanager/mkdir?path=${encodeURIComponent(path)}`, {
+    method: 'POST',
+  })
+}
+
+export async function downloadManagedFile(entry: FileEntry): Promise<void> {
+  const token = getAccessToken()
+  const res = await fetch(
+    `${API_URL}/api/openclaw/filemanager/download?path=${encodeURIComponent(entry.path)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  )
+
+  if (!res.ok) {
+    throw new Error(await parseErrorMessage(res))
+  }
+
+  const blob = await res.blob()
+  const blobUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = blobUrl
+  link.download = entry.name
+  link.click()
+  URL.revokeObjectURL(blobUrl)
 }

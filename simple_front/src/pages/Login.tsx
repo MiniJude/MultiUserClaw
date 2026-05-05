@@ -90,7 +90,7 @@ export default function Login() {
               </h1>
               <p className="mt-3 text-sm leading-6 text-light-text-secondary">
                 {mode === 'login'
-                  ? '登录后继续你的 Agent 会话和普通对话。'
+                  ? '登录后继续你的 Agent 会话和默认对话。'
                   : '创建账号后即可开始组织你的 Agent 工作流。'}
               </p>
             </div>

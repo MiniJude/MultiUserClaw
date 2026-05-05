@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Check,
   Copy,
+  BookOpen,
   Bot,
   ChevronRight,
   LayoutDashboard,
@@ -57,6 +58,7 @@ type AgentMenuState = {
 const primaryNav = [
   { to: '/chat', label: '新对话', icon: Pencil },
   { to: '/dashboard', label: '工作台', icon: LayoutDashboard },
+  { to: '/knowledge', label: '知识库', icon: BookOpen },
   { to: '/settings', label: '设置', icon: SettingsIcon },
 ]
 
@@ -258,7 +260,7 @@ export default function Layout() {
         const agent = agents.find(item => item.id === agentId)
         return {
           id: agentId,
-          label: agent?.identity?.name || agent?.name || (agentId === 'main' ? '默认 Agent' : agentId),
+          label: agent?.identity?.name || agent?.name || (agentId === 'main' ? '默认' : agentId),
           sessions: sessionsByAgent.get(agentId) || [],
         }
       })
@@ -536,7 +538,7 @@ export default function Layout() {
                   />
                 </button>
                 <IconButton
-                  label="新建普通对话"
+                  label="新建默认对话"
                   onClick={() => startAgentSession('main')}
                   size="sm"
                   surface="plain"
@@ -550,7 +552,7 @@ export default function Layout() {
                   {sessionsLoading ? (
                     <SidebarSessionSkeleton count={6} />
                   ) : ordinarySessions.length === 0 ? (
-                    <div className="px-2 py-1 text-xs text-slate-400">暂无普通对话</div>
+                    <div className="px-2 py-1 text-xs text-slate-400">暂无默认对话</div>
                   ) : ordinarySessions.slice(0, 8).map(session => {
                     const isActive = activeSessionKey === session.key
                     const isRenaming = renamingKey === session.key
