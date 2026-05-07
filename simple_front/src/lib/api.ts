@@ -814,3 +814,216 @@ export async function downloadManagedFile(entry: FileEntry): Promise<void> {
   link.click()
   URL.revokeObjectURL(blobUrl)
 }
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+export type SkillScopeType = 'global' | 'builtin' | 'agent'
+
+export interface SkillScope {
+  id: string
+  type: SkillScopeType
+  label: string
+  path: string
+  agentId?: string
+  writable: boolean
+}
+
+export interface SkillInfo {
+  name: string
+  description: string
+  source: string
+  scope: string
+  scopeType: SkillScopeType
+  scopeLabel: string
+  agentId?: string
+  available: boolean
+  disabled: boolean
+  writable: boolean
+  path: string
+  dirPath: string
+}
+
+export interface SkillFileInfo {
+  name: string
+  path: string
+  size: number
+  modified: string
+  editable: boolean
+}
+
+export interface SkillSearchResult {
+  slug: string
+  url: string
+  installs: string
+  sizeLabel?: string
+}
+
+export interface GitSkillInfo {
+  name: string
+  description: string
+  relativePath: string
+}
+
+export interface GitScanResult {
+  repo: string
+  repoName: string
+  skills: GitSkillInfo[]
+  cacheKey: string
+}
+
+export interface SkillDetail {
+  name: string
+  description: string
+  category: string
+  markdown: string
+  meta: Record<string, unknown>
+}
+
+function skillTargetBody(scope: SkillScope) {
+  return scope.type === 'agent' ? { scope: 'agent', agentId: scope.agentId } : { scope: scope.type }
+}
+
+function skillTargetQuery(scope: SkillScope): string {
+  const params = new URLSearchParams({ scope: scope.type })
+  if (scope.agentId) params.set('agentId', scope.agentId)
+  return params.toString()
+}
+
+export async function listSkillScopes(): Promise<SkillScope[]> {
+  return fetchJSON<SkillScope[]>('/api/openclaw/skills/scopes')
+}
+
+export async function listSkills(scope?: SkillScope): Promise<SkillInfo[]> {
+  const query = scope ? `?${skillTargetQuery(scope)}` : '?all=1'
+  return fetchJSON<SkillInfo[]>(`/api/openclaw/skills${query}`)
+}
+
+export async function deleteSkill(skill: SkillInfo): Promise<void> {
+  await fetchJSON<unknown>(
+    `/api/openclaw/skills/${encodeURIComponent(skill.name)}?${skillTargetQuery({
+      id: skill.scope,
+      type: skill.scopeType,
+      label: skill.scopeLabel,
+      path: '',
+      agentId: skill.agentId,
+      writable: skill.writable,
+    })}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function uploadSkillZip(file: File, scope: SkillScope): Promise<SkillInfo> {
+  const token = getAccessToken()
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('scope', scope.type)
+  if (scope.agentId) formData.append('agentId', scope.agentId)
+
+  const res = await fetch(`${API_URL}/api/openclaw/skills/upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  })
+  if (!res.ok) throw new Error(await parseErrorMessage(res))
+  return res.json() as Promise<SkillInfo>
+}
+
+export async function downloadSkill(skill: SkillInfo): Promise<void> {
+  const token = getAccessToken()
+  const scope: SkillScope = {
+    id: skill.scope,
+    type: skill.scopeType,
+    label: skill.scopeLabel,
+    path: '',
+    agentId: skill.agentId,
+    writable: skill.writable,
+  }
+  const res = await fetch(
+    `${API_URL}/api/openclaw/skills/${encodeURIComponent(skill.name)}/download?${skillTargetQuery(scope)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  )
+  if (!res.ok) throw new Error(await parseErrorMessage(res))
+  const blob = await res.blob()
+  const blobUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = blobUrl
+  link.download = `${skill.name}.zip`
+  link.click()
+  URL.revokeObjectURL(blobUrl)
+}
+
+export async function listSkillFiles(skill: SkillInfo): Promise<{ skill: SkillInfo; files: SkillFileInfo[] }> {
+  const scope: SkillScope = {
+    id: skill.scope,
+    type: skill.scopeType,
+    label: skill.scopeLabel,
+    path: '',
+    agentId: skill.agentId,
+    writable: skill.writable,
+  }
+  return fetchJSON<{ skill: SkillInfo; files: SkillFileInfo[] }>(
+    `/api/openclaw/skills/${encodeURIComponent(skill.name)}/files?${skillTargetQuery(scope)}`,
+  )
+}
+
+export async function getSkillFile(skill: SkillInfo, path: string): Promise<{ path: string; name: string; content: string }> {
+  const scope: SkillScope = {
+    id: skill.scope,
+    type: skill.scopeType,
+    label: skill.scopeLabel,
+    path: '',
+    agentId: skill.agentId,
+    writable: skill.writable,
+  }
+  return fetchJSON<{ path: string; name: string; content: string }>(
+    `/api/openclaw/skills/${encodeURIComponent(skill.name)}/files/content?${skillTargetQuery(scope)}&path=${encodeURIComponent(path)}`,
+  )
+}
+
+export async function writeSkillFile(skill: SkillInfo, path: string, content: string): Promise<void> {
+  await fetchJSON<unknown>(`/api/openclaw/skills/${encodeURIComponent(skill.name)}/files/content`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      ...skillTargetBody({
+        id: skill.scope,
+        type: skill.scopeType,
+        label: skill.scopeLabel,
+        path: '',
+        agentId: skill.agentId,
+        writable: skill.writable,
+      }),
+      path,
+      content,
+    }),
+  })
+}
+
+export async function searchSkills(query: string, limit = 10): Promise<{ results: SkillSearchResult[] }> {
+  return fetchJSON<{ results: SkillSearchResult[] }>('/api/openclaw/marketplaces/skills/search', {
+    method: 'POST',
+    body: JSON.stringify({ query, limit }),
+  })
+}
+
+export async function installSkillFromSearch(slug: string, scope: SkillScope): Promise<{ ok: boolean; output: string; name: string }> {
+  return fetchJSON<{ ok: boolean; output: string; name: string }>('/api/openclaw/marketplaces/skills/install', {
+    method: 'POST',
+    body: JSON.stringify({ slug, ...skillTargetBody(scope) }),
+  })
+}
+
+export async function scanGitSkills(url: string): Promise<GitScanResult> {
+  return fetchJSON<GitScanResult>('/api/openclaw/marketplaces/git/scan-skills', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  })
+}
+
+export async function installGitSkills(cacheKey: string, skillNames: string[], scope: SkillScope): Promise<{ ok: boolean; installed: string[]; errors: string[] }> {
+  return fetchJSON<{ ok: boolean; installed: string[]; errors: string[] }>('/api/openclaw/marketplaces/git/install-skills', {
+    method: 'POST',
+    body: JSON.stringify({ cacheKey, skillNames, ...skillTargetBody(scope) }),
+  })
+}

@@ -13,6 +13,7 @@ import {
 import AgentCreatePanel from '../components/AgentCreatePanel.tsx'
 import IconButton from '../components/ui/IconButton.tsx'
 import Popconfirm from '../components/ui/Popconfirm.tsx'
+import { useToast } from '../components/ui/Toast.tsx'
 import {
   DEFAULT_APPEARANCE,
   readAppearanceSettings,
@@ -141,20 +142,18 @@ function AgentsSettings() {
       avatar: string
     }
   } | null>(null)
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const toast = useToast()
 
   const systemAgents = useMemo(() => agents.filter(isSystemAgent), [agents])
   const customAgents = useMemo(() => agents.filter(agent => !isSystemAgent(agent)), [agents])
 
   const loadAgents = async () => {
     setLoading(true)
-    setError('')
     try {
       const result = await listAgents()
       setAgents(result.agents || [])
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载 Agents 失败')
+      toast.error(err instanceof Error ? err.message : '加载 Agents 失败')
     } finally {
       setLoading(false)
     }
@@ -166,8 +165,6 @@ function AgentsSettings() {
 
   const openAgentPanel = async (agent: AgentInfo, mode: 'edit' | 'view') => {
     setPanelLoadingId(agent.id)
-    setError('')
-    setNotice('')
     try {
       const result = await getAgentFile(agent.id, 'IDENTITY.md')
       setPanel({
@@ -197,14 +194,12 @@ function AgentsSettings() {
   const handleDelete = async (agent: AgentInfo) => {
     if (isSystemAgent(agent)) return
     setDeletingId(agent.id)
-    setError('')
-    setNotice('')
     try {
       await deleteAgent(agent.id)
-      setNotice(`已删除 ${getAgentDisplayName(agent)}`)
+      toast.success(`已删除 ${getAgentDisplayName(agent)}`)
       await loadAgents()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除 Agent 失败')
+      toast.error(err instanceof Error ? err.message : '删除 Agent 失败')
     } finally {
       setDeletingId('')
     }
@@ -292,13 +287,6 @@ function AgentsSettings() {
   return (
     <div className="mt-8">
       <section className="rounded-xl bg-light-card p-2">
-        {error && (
-          <div className="mb-2 rounded-lg bg-accent-red/5 px-3 py-2 text-sm text-accent-red">{error}</div>
-        )}
-        {notice && (
-          <div className="mb-2 rounded-lg bg-accent-blue/5 px-3 py-2 text-sm text-accent-blue">{notice}</div>
-        )}
-
         {loading ? (
           <div className="flex items-center gap-2 px-3 py-4 text-sm text-light-text-secondary">
             <Loader2 size={16} className="animate-spin" />
@@ -335,7 +323,7 @@ function AgentsSettings() {
         onSaved={async input => {
           await updateAgentName(input.agentId, input.displayName, input.avatar)
           await setAgentFile(input.agentId, 'IDENTITY.md', buildIdentityContent(input.displayName, input.description))
-          setNotice('Agent 已保存')
+          toast.success('Agent 已保存')
           await loadAgents()
         }}
       />

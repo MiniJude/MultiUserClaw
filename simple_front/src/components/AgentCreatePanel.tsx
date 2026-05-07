@@ -3,6 +3,7 @@ import { Bot, Check, Loader2, RefreshCw, Sparkles, X } from 'lucide-react'
 import ClearableInput from './ui/ClearableInput.tsx'
 import ClearableTextarea from './ui/ClearableTextarea.tsx'
 import IconButton from './ui/IconButton.tsx'
+import { useToast } from './ui/Toast.tsx'
 import { createAgent, generateAgentIcon } from '../lib/api.ts'
 
 type AgentPanelMode = 'create' | 'edit' | 'view'
@@ -50,7 +51,7 @@ export default function AgentCreatePanel({
   const [generatedIconId, setGeneratedIconId] = useState('')
   const [saving, setSaving] = useState(false)
   const [generatingIcon, setGeneratingIcon] = useState(false)
-  const [error, setError] = useState('')
+  const toast = useToast()
 
   const readOnly = mode === 'view'
   const editingExisting = mode !== 'create'
@@ -59,7 +60,6 @@ export default function AgentCreatePanel({
 
   useEffect(() => {
     if (!open) return
-    setError('')
     if (editingExisting && initialValues) {
       setDisplayName(initialValues.displayName)
       setAgentId(initialValues.agentId)
@@ -88,7 +88,6 @@ export default function AgentCreatePanel({
   const refreshIcon = async () => {
     if (readOnly) return
     setGeneratingIcon(true)
-    setError('')
     try {
       const icon = await generateAgentIcon(
         displayName.trim(),
@@ -99,7 +98,7 @@ export default function AgentCreatePanel({
       setAvatar(icon.dataUrl)
       setGeneratedIconId(icon.id || '')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成图标失败')
+      toast.error(err instanceof Error ? err.message : '生成图标失败')
     } finally {
       setGeneratingIcon(false)
     }
@@ -112,7 +111,6 @@ export default function AgentCreatePanel({
     if (!canSubmit) return
 
     setSaving(true)
-    setError('')
     try {
       const nextDisplayName = displayName.trim()
       if (mode === 'edit') {
@@ -143,7 +141,7 @@ export default function AgentCreatePanel({
       onClose()
       await onCreated?.(nextAgentId, nextDisplayName || nextAgentId)
     } catch (err) {
-      setError(err instanceof Error ? err.message : mode === 'edit' ? '保存 Agent 失败' : '创建 Agent 失败')
+      toast.error(err instanceof Error ? err.message : mode === 'edit' ? '保存 Agent 失败' : '创建 Agent 失败')
     } finally {
       setSaving(false)
     }
@@ -237,12 +235,6 @@ export default function AgentCreatePanel({
                 clearLabel="清空任务说明"
               />
             </div>
-
-            {error && (
-              <div className="rounded-xl border border-accent-red/20 bg-accent-red/5 px-3 py-2 text-sm text-accent-red">
-                {error}
-              </div>
-            )}
           </div>
 
           <footer className="flex items-center justify-end gap-2 border-t border-light-border px-5 py-4">

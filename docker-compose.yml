@@ -73,6 +73,8 @@ services:
       PLATFORM_CONTAINER_MEMORY_LIMIT: ${PLATFORM_CONTAINER_MEMORY_LIMIT:-2g}
       PLATFORM_CONTAINER_SHM_SIZE: ${PLATFORM_CONTAINER_SHM_SIZE:-1g}
       PLATFORM_CONTAINER_DATA_DIR: /data/openclaw-users
+      PLATFORM_SKILLS_REPO_MIRROR_MAP: ${SKILLS_REPO_MIRROR_MAP:-}
+      PLATFORM_GITHUB_MIRROR_PREFIXES: ${GITHUB_MIRROR_PREFIXES:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker API access for container management
       - userdata:/data/openclaw-users
@@ -107,6 +109,8 @@ services:
       DEPLOY_VERSION: ${DEPLOY_VERSION:-}
       TZ: ${CONTAINER_TZ:-Asia/Shanghai}
       BRIDGE_ENABLE_CHANNELS: "0"
+      NANOBOT_SKILLS_REPO_MIRROR_MAP: ${SKILLS_REPO_MIRROR_MAP:-}
+      NANOBOT_GITHUB_MIRROR_PREFIXES: ${GITHUB_MIRROR_PREFIXES:-}
     volumes:
       - shared_openclaw_data:/root/.openclaw
     networks:

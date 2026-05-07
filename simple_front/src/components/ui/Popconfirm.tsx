@@ -74,7 +74,12 @@ export default function Popconfirm({
   }, [open, updatePosition])
 
   return (
-    <span ref={ref} className="relative inline-flex">
+    <span
+      ref={ref}
+      className="relative inline-flex"
+      onClick={event => event.stopPropagation()}
+      onMouseDown={event => event.stopPropagation()}
+    >
       {cloneElement(children, {
         onClick: (event: ReactMouseEvent) => {
           event.stopPropagation()
@@ -87,6 +92,8 @@ export default function Popconfirm({
         <span
           style={{ top: position.top, left: position.left }}
           className="fixed z-[90] flex max-h-[min(320px,calc(100vh-16px))] w-64 flex-col rounded-xl border border-light-border bg-white p-3 text-left shadow-xl shadow-slate-200/80"
+          onClick={event => event.stopPropagation()}
+          onMouseDown={event => event.stopPropagation()}
         >
           <span className="block shrink-0 text-sm font-medium text-light-text">{title}</span>
           {description && (
@@ -97,14 +104,18 @@ export default function Popconfirm({
           <span className="mt-3 flex shrink-0 justify-end gap-2">
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={event => {
+                event.stopPropagation()
+                setOpen(false)
+              }}
               className="cursor-pointer rounded-lg border border-light-border px-3 py-1.5 text-xs text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text"
             >
               {cancelText}
             </button>
             <button
               type="button"
-              onClick={async () => {
+              onClick={async event => {
+                event.stopPropagation()
                 await onConfirm()
                 setOpen(false)
               }}

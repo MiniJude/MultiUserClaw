@@ -16,6 +16,7 @@ import {
   Minimize2,
   Pencil,
   Plus,
+  Sparkles,
   Settings as SettingsIcon,
   Trash2,
   X,
@@ -64,6 +65,7 @@ const primaryNav = [
   { to: '/chat', label: '新对话', icon: Pencil },
   { to: '/dashboard', label: '工作台', icon: LayoutDashboard },
   { to: '/knowledge', label: '知识库', icon: BookOpen },
+  { to: '/skills', label: '技能商店', icon: Sparkles },
   { to: '/cron', label: '定时任务', icon: Clock },
   { to: '/settings', label: '设置', icon: SettingsIcon },
 ]
@@ -523,7 +525,7 @@ export default function Layout() {
           ))}
         </nav>
 
-        <div className="mt-7 flex min-h-0 flex-1 flex-col">
+        <div className="mt-7 min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="mb-2 flex items-center justify-between px-2 text-xs text-slate-500">
             <button
               onClick={() => setAgentsFolderOpen(value => !value)}
@@ -546,9 +548,7 @@ export default function Layout() {
             </IconButton>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <>
-              <div className={`sidebar-collapse ${agentsFolderOpen ? 'is-open' : ''}`}>
+          <div className={`sidebar-collapse ${agentsFolderOpen ? 'is-open' : ''}`}>
                 <div>
                   {sessionsLoading ? (
                     <SidebarSessionSkeleton count={3} />
@@ -679,7 +679,6 @@ export default function Layout() {
                   {sessionsLoading ? '正在加载 Agent 对话' : `已收起 ${agentGroups.length} 个 Agent`}
                 </div>
               </div>
-            </>
 
             <section className="mt-5 border-t border-slate-200/70 pt-4">
               <div className="mb-2 flex items-center justify-between px-2 text-xs text-slate-500">
@@ -783,7 +782,6 @@ export default function Layout() {
                 </div>
               </div>
             </section>
-          </div>
         </div>
 
         <div className="mt-3 flex items-center justify-between rounded-xl px-2 py-2 text-slate-700">

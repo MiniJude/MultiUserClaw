@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  AlertCircle,
   CalendarClock,
-  CheckCircle2,
   Clock,
   Loader2,
   Pause,
@@ -16,6 +14,7 @@ import ClearableInput from '../components/ui/ClearableInput.tsx'
 import ClearableTextarea from '../components/ui/ClearableTextarea.tsx'
 import IconButton from '../components/ui/IconButton.tsx'
 import Popconfirm from '../components/ui/Popconfirm.tsx'
+import { useToast } from '../components/ui/Toast.tsx'
 import {
   createCronJob,
   deleteCronJob,
@@ -64,33 +63,6 @@ function getScheduleText(job: CronJob): string {
 
 function getJobTitle(job: CronJob): string {
   return job.name?.trim() || job.id
-}
-
-function AlertMessage({
-  message,
-  tone = 'danger',
-  onClose,
-}: {
-  message: string
-  tone?: 'danger' | 'success'
-  onClose?: () => void
-}) {
-  const Icon = tone === 'success' ? CheckCircle2 : AlertCircle
-  return (
-    <div
-      className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm ${
-        tone === 'success' ? 'bg-accent-blue/5 text-accent-blue' : 'bg-accent-red/5 text-accent-red'
-      }`}
-    >
-      <Icon size={16} className="shrink-0" />
-      <span className="min-w-0 flex-1">{message}</span>
-      {onClose && (
-        <IconButton label="关闭提示" size="sm" surface="plain" onClick={onClose}>
-          <X size={14} />
-        </IconButton>
-      )}
-    </div>
-  )
 }
 
 function StatCardSkeleton() {
@@ -157,12 +129,7 @@ function CreateCronPanel({
   const [cronExpr, setCronExpr] = useState('')
   const [atIso, setAtIso] = useState('')
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    if (!open) return
-    setError('')
-  }, [open])
+  const toast = useToast()
 
   const everyPreview = useMemo(
     () => formatEveryMs((Number.parseInt(everySeconds, 10) || 0) * 1000),
@@ -173,11 +140,11 @@ function CreateCronPanel({
     const trimmedName = name.trim()
     const trimmedMessage = message.trim()
     if (!trimmedName) {
-      setError('请输入任务名称')
+      toast.error('请输入任务名称')
       return
     }
     if (!trimmedMessage) {
-      setError('请输入任务消息')
+      toast.error('请输入任务消息')
       return
     }
 
@@ -189,7 +156,7 @@ function CreateCronPanel({
     if (scheduleType === 'every') {
       const seconds = Number.parseInt(everySeconds, 10)
       if (!Number.isFinite(seconds) || seconds < 1) {
-        setError('间隔秒数必须大于 0')
+        toast.error('间隔秒数必须大于 0')
         return
       }
       params.every_seconds = seconds
@@ -198,7 +165,7 @@ function CreateCronPanel({
     if (scheduleType === 'cron') {
       const expr = cronExpr.trim()
       if (!expr) {
-        setError('请输入 Cron 表达式')
+        toast.error('请输入 Cron 表达式')
         return
       }
       params.cron_expr = expr
@@ -206,19 +173,18 @@ function CreateCronPanel({
 
     if (scheduleType === 'once') {
       if (!atIso.trim()) {
-        setError('请选择执行时间')
+        toast.error('请选择执行时间')
         return
       }
       const date = new Date(atIso)
       if (Number.isNaN(date.getTime())) {
-        setError('执行时间格式不正确')
+        toast.error('执行时间格式不正确')
         return
       }
       params.at_iso = date.toISOString()
     }
 
     setSaving(true)
-    setError('')
     try {
       const job = await createCronJob(params)
       onCreated(job)
@@ -229,7 +195,7 @@ function CreateCronPanel({
       setCronExpr('')
       setAtIso('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建失败')
+      toast.error(err instanceof Error ? err.message : '创建失败')
     } finally {
       setSaving(false)
     }
@@ -253,8 +219,6 @@ function CreateCronPanel({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
           <div className="space-y-5">
-            {error && <AlertMessage message={error} />}
-
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-light-text-secondary">任务名称</span>
               <ClearableInput
@@ -375,21 +339,19 @@ export default function CronJobs() {
   const [jobs, setJobs] = useState<CronJob[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [runningId, setRunningId] = useState('')
   const [togglingId, setTogglingId] = useState('')
   const [deletingId, setDeletingId] = useState('')
+  const toast = useToast()
 
   const loadJobs = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true)
-    setError('')
     try {
       const result = await listCronJobs(true)
       setJobs(result)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '获取定时任务失败')
+      toast.error(err instanceof Error ? err.message : '获取定时任务失败')
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -409,13 +371,11 @@ export default function CronJobs() {
 
   const handleToggle = async (job: CronJob) => {
     setTogglingId(job.id)
-    setError('')
-    setNotice('')
     try {
       const updated = await toggleCronJob(job.id, !job.enabled)
       setJobs(current => current.map(item => (item.id === job.id ? updated : item)))
     } catch (err) {
-      setError(err instanceof Error ? err.message : '切换状态失败')
+      toast.error(err instanceof Error ? err.message : '切换状态失败')
     } finally {
       setTogglingId('')
     }
@@ -423,14 +383,12 @@ export default function CronJobs() {
 
   const handleRun = async (job: CronJob) => {
     setRunningId(job.id)
-    setError('')
-    setNotice('')
     try {
       await runCronJob(job.id)
-      setNotice(`已触发“${getJobTitle(job)}”`)
+      toast.success(`已触发“${getJobTitle(job)}”`)
       await loadJobs()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '执行失败')
+      toast.error(err instanceof Error ? err.message : '执行失败')
     } finally {
       setRunningId('')
     }
@@ -438,14 +396,12 @@ export default function CronJobs() {
 
   const handleDelete = async (job: CronJob) => {
     setDeletingId(job.id)
-    setError('')
-    setNotice('')
     try {
       await deleteCronJob(job.id)
       setJobs(current => current.filter(item => item.id !== job.id))
-      setNotice(`已删除“${getJobTitle(job)}”`)
+      toast.success(`已删除“${getJobTitle(job)}”`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除失败')
+      toast.error(err instanceof Error ? err.message : '删除失败')
     } finally {
       setDeletingId('')
     }
@@ -502,11 +458,6 @@ export default function CronJobs() {
             </>
           )}
         </section>
-
-        <div className="mt-5 space-y-2">
-          {error && <AlertMessage message={error} onClose={() => setError('')} />}
-          {notice && <AlertMessage message={notice} tone="success" onClose={() => setNotice('')} />}
-        </div>
 
         <section className="mt-5 min-h-0 flex-1">
           {loading ? (
@@ -635,7 +586,7 @@ export default function CronJobs() {
         onClose={() => setCreateOpen(false)}
         onCreated={job => {
           setJobs(current => [...current, job])
-          setNotice(`已创建“${getJobTitle(job)}”`)
+          toast.success(`已创建“${getJobTitle(job)}”`)
           setCreateOpen(false)
         }}
       />

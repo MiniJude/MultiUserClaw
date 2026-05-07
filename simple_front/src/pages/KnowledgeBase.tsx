@@ -20,6 +20,7 @@ import {
 import ClearableInput from '../components/ui/ClearableInput.tsx'
 import IconButton from '../components/ui/IconButton.tsx'
 import Popconfirm from '../components/ui/Popconfirm.tsx'
+import { useToast } from '../components/ui/Toast.tsx'
 import {
   browseFiles,
   createDirectory,
@@ -101,7 +102,6 @@ export default function KnowledgeBase() {
   const [subPath, setSubPath] = useState('')
   const [data, setData] = useState<BrowseDirectoryResult | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [newFolderOpen, setNewFolderOpen] = useState(false)
@@ -109,8 +109,8 @@ export default function KnowledgeBase() {
   const [editorFile, setEditorFile] = useState<{ path: string; name: string; content: string; originalContent: string } | null>(null)
   const [editorLoading, setEditorLoading] = useState(false)
   const [editorSaving, setEditorSaving] = useState(false)
-  const [editorStatus, setEditorStatus] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const toast = useToast()
 
   const availableAgents = useMemo(() => agents.filter(agent => agent.id), [agents])
   const selectedAgentInfo = availableAgents.find(agent => agent.id === selectedAgent)
@@ -126,10 +126,8 @@ export default function KnowledgeBase() {
     if (!agentId) return
     const agent = availableAgents.find(item => item.id === agentId)
     setLoading(true)
-    setError('')
     if (!options.keepEditor) {
       setEditorFile(null)
-      setEditorStatus('')
     }
     try {
       const result = await browseFiles(fullPath(agent, agentId, nextSubPath))
@@ -146,10 +144,10 @@ export default function KnowledgeBase() {
           setData(result)
           setSubPath(nextSubPath)
         } catch (createErr) {
-          setError(createErr instanceof Error ? createErr.message : '加载失败')
+          toast.error(createErr instanceof Error ? createErr.message : '加载失败')
         }
       } else {
-        setError(message)
+        toast.error(message)
       }
     } finally {
       setLoading(false)
@@ -164,7 +162,6 @@ export default function KnowledgeBase() {
   const closeEditor = () => {
     setEditorFile(null)
     setEditorLoading(false)
-    setEditorStatus('')
   }
 
   const navigateTo = (nextSubPath: string) => {
@@ -180,14 +177,13 @@ export default function KnowledgeBase() {
     const files = event.target.files
     if (!files || files.length === 0 || !selectedAgent) return
     setUploading(true)
-    setError('')
     try {
       for (const file of Array.from(files)) {
         await uploadFile(file, fullPath(selectedAgentInfo, selectedAgent, subPath))
       }
       await loadDir(selectedAgent, subPath)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传失败')
+      toast.error(err instanceof Error ? err.message : '上传失败')
     } finally {
       setUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -197,25 +193,25 @@ export default function KnowledgeBase() {
   const handleNewFolder = async () => {
     const folderName = newFolderName.trim()
     if (!folderName || !selectedAgent) return
-    setError('')
     try {
       await createDirectory(`${fullPath(selectedAgentInfo, selectedAgent, subPath)}/${folderName}`)
       setNewFolderOpen(false)
       setNewFolderName('')
+      toast.success(`已创建文件夹 ${folderName}`)
       await loadDir(selectedAgent, subPath)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建失败')
+      toast.error(err instanceof Error ? err.message : '创建失败')
     }
   }
 
   const handleDelete = async (entry: FileEntry) => {
     setDeleting(entry.path)
-    setError('')
     try {
       await deleteFile(entry.path)
+      toast.success(`已删除 ${entry.name}`)
       await loadDir(selectedAgent, subPath)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除失败')
+      toast.error(err instanceof Error ? err.message : '删除失败')
     } finally {
       setDeleting(null)
     }
@@ -223,7 +219,6 @@ export default function KnowledgeBase() {
 
   const handleEditFile = async (entry: FileEntry) => {
     setEditorLoading(true)
-    setEditorStatus('')
     try {
       const result = await browseFiles(entry.path)
       const fileResult = result as BrowseFileResult
@@ -238,7 +233,7 @@ export default function KnowledgeBase() {
         originalContent: content,
       })
     } catch (err) {
-      setError(err instanceof Error ? err.message : '无法加载文件内容')
+      toast.error(err instanceof Error ? err.message : '无法加载文件内容')
     } finally {
       setEditorLoading(false)
     }
@@ -247,16 +242,13 @@ export default function KnowledgeBase() {
   const handleSaveEditor = useCallback(async () => {
     if (!editorFile || editorSaving) return
     setEditorSaving(true)
-    setEditorStatus('')
-    setError('')
     try {
       await writeManagedFile(editorFile.path, editorFile.content)
       setEditorFile(current => current ? { ...current, originalContent: current.content } : current)
-      setEditorStatus(`已保存 ${formatDate(new Date().toISOString())}`)
+      toast.success(`已保存 ${editorFile.name}`)
       if (selectedAgent) await loadDir(selectedAgent, subPath, { keepEditor: true })
     } catch (err) {
-      setEditorStatus('')
-      setError(err instanceof Error ? err.message : '保存失败')
+      toast.error(err instanceof Error ? err.message : '保存失败')
     } finally {
       setEditorSaving(false)
     }
@@ -279,11 +271,10 @@ export default function KnowledgeBase() {
   }, [editorFile, handleSaveEditor])
 
   const handleDownload = async (entry: FileEntry) => {
-    setError('')
     try {
       await downloadManagedFile(entry)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '下载失败')
+      toast.error(err instanceof Error ? err.message : '下载失败')
     }
   }
 
@@ -401,12 +392,6 @@ export default function KnowledgeBase() {
           </aside>
 
           <div className="flex min-w-0 flex-1 flex-col">
-            {error && (
-              <div className="mb-4 rounded-lg border border-accent-red/20 bg-accent-red/10 px-4 py-3 text-sm text-accent-red">
-                {error}
-              </div>
-            )}
-
             {newFolderOpen && (
               <div className="mb-4 flex flex-col gap-2 rounded-lg border border-light-border bg-light-card p-3 shadow-sm sm:flex-row sm:items-center">
                 <ClearableInput
@@ -591,11 +576,6 @@ export default function KnowledgeBase() {
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {editorStatus && (
-                  <span className="hidden text-xs text-light-text-secondary sm:inline">
-                    {editorStatus}
-                  </span>
-                )}
                 {editorDirty && (
                   <span className="rounded-full bg-accent-yellow/10 px-2 py-1 text-xs font-medium text-amber-700">
                     未保存
@@ -627,7 +607,6 @@ export default function KnowledgeBase() {
                 onChange={event => {
                   const value = event.target.value
                   setEditorFile(current => current ? { ...current, content: value } : current)
-                  setEditorStatus('')
                 }}
                 spellCheck={false}
                 autoFocus
@@ -637,7 +616,6 @@ export default function KnowledgeBase() {
 
             <footer className="flex min-h-10 items-center justify-between gap-3 border-t border-light-border px-4 py-2 text-xs text-light-text-secondary">
               <span className="truncate">Ctrl+S 保存到 workspace 对应文件</span>
-              {editorStatus && <span className="truncate sm:hidden">{editorStatus}</span>}
             </footer>
           </section>
         </div>

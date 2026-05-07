@@ -23,6 +23,7 @@ import ClearableInput from '../components/ui/ClearableInput.tsx'
 import ClearableTextarea from '../components/ui/ClearableTextarea.tsx'
 import IconButton from '../components/ui/IconButton.tsx'
 import Tooltip from '../components/ui/Tooltip.tsx'
+import { useToast } from '../components/ui/Toast.tsx'
 import type { LayoutOutletContext } from '../components/Layout.tsx'
 import {
   getSession,
@@ -168,7 +169,6 @@ export default function Chat() {
   const [chatLoading, setChatLoading] = useState(false)
   const [input, setInput] = useState('')
   const [sendingBySession, setSendingBySession] = useState<Record<string, boolean>>({})
-  const [error, setError] = useState('')
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [displayedTextBySession, setDisplayedTextBySession] = useState<Record<string, string>>({})
   const targetTextBySessionRef = useRef<Record<string, string>>({})
@@ -261,7 +261,6 @@ export default function Chat() {
   const [isDraftSession, setIsDraftSession] = useState(false)
   const [agentPickerOpen, setAgentPickerOpen] = useState(false)
   const [agentCreateOpen, setAgentCreateOpen] = useState(false)
-  const [notice, setNotice] = useState('')
   const [agentSearch, setAgentSearch] = useState('')
   const [agentPickerStyle, setAgentPickerStyle] = useState<CSSProperties>({})
   const [agentPickerListMaxHeight, setAgentPickerListMaxHeight] = useState(288)
@@ -273,6 +272,7 @@ export default function Chat() {
   const agentPickerRef = useRef<HTMLDivElement>(null)
   const agentPickerButtonRef = useRef<HTMLButtonElement>(null)
   const sessionLoadSeqRef = useRef(0)
+  const toast = useToast()
 
   const resolveKnownSessionKey = useCallback((rawKey: string): string => {
     const normalized = normalizeSessionKey(rawKey)
@@ -298,10 +298,8 @@ export default function Chat() {
   useEffect(() => {
     const createdAgent = searchParams.get('createdAgent')
     if (!createdAgent) return
-    setNotice(`已创建“${createdAgent}”，可以开始对话了`)
-    const timer = window.setTimeout(() => setNotice(''), 6000)
-    return () => window.clearTimeout(timer)
-  }, [searchParams])
+    toast.success(`已创建“${createdAgent}”，可以开始对话了`, 6000)
+  }, [searchParams, toast])
 
   const updateAgentPickerPosition = useCallback(() => {
     const button = agentPickerButtonRef.current
@@ -386,7 +384,6 @@ export default function Chat() {
     activeSessionKeyRef.current = null
     setMessages([])
     setPendingFiles([])
-    setError('')
     setChatLoading(false)
     setIsDraftSession(true)
     setDraftAgentId(agentId)
@@ -403,7 +400,6 @@ export default function Chat() {
     setDraftAgentId(getAgentIdFromKey(key))
     setAgentPickerOpen(false)
     setChatLoading(true)
-    setError('')
     setSearchParams({ session: key })
     const cachedMessages = sessionMessagesCacheRef.current[key]
     if (!options.force && cachedMessages) {
@@ -417,7 +413,7 @@ export default function Chat() {
       applyLoadedMessages(key, detail.messages || [])
     } catch (err: any) {
       if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
-      setError(err?.message || '加载会话失败')
+      toast.error(err?.message || '加载会话失败')
       setMessages([])
     } finally {
       if (sessionLoadSeqRef.current === loadSeq && activeSessionKeyRef.current === key) {
@@ -432,7 +428,6 @@ export default function Chat() {
     activeSessionKeyRef.current = null
     setMessages([])
     setPendingFiles([])
-    setError('')
     setIsDraftSession(true)
     setDraftAgentId(agentId)
     setSearchParams(agentId ? { new: '1', agent: agentId } : { new: '1' })
@@ -552,10 +547,10 @@ export default function Chat() {
         clearStreamingText(eventSessionKey)
         setSendingForSession(eventSessionKey, false)
         sseCompletedRef.current[eventSessionKey] = true
-        setError('回复暂未写入会话，请稍后刷新查看')
+        toast.error('回复暂未写入会话，请稍后刷新查看')
       }, 3000)
     }
-  }, [applyLoadedMessages, clearStreamingText, refreshSessions, resolveKnownSessionKey, setSendingForSession, setStreamingText])
+  }, [applyLoadedMessages, clearStreamingText, refreshSessions, resolveKnownSessionKey, setSendingForSession, setStreamingText, toast])
 
   // Connect SSE on mount
   useEffect(() => {
@@ -631,7 +626,7 @@ export default function Chat() {
             clearStreamingText(key)
             sseCompletedRef.current[key] = true
             if (waitResult.status === 'error') {
-              setError('Agent 执行出错，请稍后重试')
+              toast.error('Agent 执行出错，请稍后重试')
             }
             return
           }
@@ -696,7 +691,6 @@ export default function Chat() {
       setSearchParams({ session: sendingSessionKey })
     }
     setSendingForSession(sendingSessionKey, true)
-    setError('')
 
     try {
       const agentId = getAgentIdFromKey(sendingSessionKey)
@@ -778,7 +772,7 @@ export default function Chat() {
       void refreshSessions({ silent: true, force: true })
     } catch (err: any) {
       if (!abortedSessionRef.current[sendingSessionKey]) {
-        setError(err?.message || '发送失败')
+        toast.error(err?.message || '发送失败')
       }
     } finally {
       setSendingForSession(sendingSessionKey, false)
@@ -799,7 +793,6 @@ export default function Chat() {
     clearStreamingText(key)
     setSendingForSession(key, false)
     setRunIdForSession(key, null)
-    setError('')
 
     try {
       const runId = runIdBySessionRef.current[key]
@@ -814,7 +807,7 @@ export default function Chat() {
       }
       void refreshSessions({ silent: true, force: true })
     } catch (err: any) {
-      setError(err?.message || '终止失败')
+      toast.error(err?.message || '终止失败')
     }
   }
 
@@ -847,10 +840,9 @@ export default function Chat() {
 
   const handleAgentCreated = async (agentId: string, displayName: string) => {
     setAgentCreateOpen(false)
-    setNotice(`已创建“${displayName}”，可以开始对话了`)
+    toast.success(`已创建“${displayName}”，可以开始对话了`, 6000)
     await refreshAgents({ force: true })
     handleSelectDraftAgent(agentId)
-    window.setTimeout(() => setNotice(''), 6000)
   }
 
   const formatTime = (iso: string | null) => {
@@ -1094,12 +1086,6 @@ export default function Chat() {
     <div className="flex h-full">
       {/* Chat area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {notice && (
-          <div className="pointer-events-none fixed left-1/2 top-4 z-[80] -translate-x-1/2 rounded-xl border border-accent-green/20 bg-light-card px-4 py-2 text-sm text-light-text shadow-xl shadow-slate-200/80">
-            {notice}
-          </div>
-        )}
-
         {activeSessionKey || isDraftSession ? (
           <>
             {/* Chat header */}
@@ -1228,16 +1214,6 @@ export default function Chat() {
                 </div>
               )}
             </div>
-
-            {/* Error */}
-            {error && (
-              <div className="px-5 py-2">
-                <div className="rounded-lg bg-accent-red/10 px-3 py-2 text-xs text-accent-red max-w-3xl mx-auto">
-                  {error}
-                </div>
-              </div>
-            )}
-
             {/* Input */}
             {!isDraftStart && (
               <div className="px-5 py-3 shrink-0">

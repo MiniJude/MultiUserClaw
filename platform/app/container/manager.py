@@ -293,6 +293,8 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         "DEPLOY_VERSION": settings.deploy_version,
         "TZ": settings.container_tz,
         "BRIDGE_ENABLE_CHANNELS": "1",
+        "NANOBOT_SKILLS_REPO_MIRROR_MAP": settings.skills_repo_mirror_map,
+        "NANOBOT_GITHUB_MIRROR_PREFIXES": settings.github_mirror_prefixes,
     }
     # if sso_token:
     #     container_env["SSO_TOKEN"] = sso_token

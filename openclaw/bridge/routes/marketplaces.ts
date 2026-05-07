@@ -2,9 +2,10 @@ import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execSync, exec } from "node:child_process";
+import { execSync, exec, execFileSync } from "node:child_process";
 import type { BridgeConfig } from "../config.js";
 import { asyncHandler } from "../utils.js";
+import { parseSkillTarget, resolveSkillTargetDir } from "./skill-targets.js";
 
 // Strip ANSI escape codes
 function stripAnsi(str: string): string {
@@ -76,6 +77,201 @@ function parseSkillMdDescription(content: string): string {
     description = lines.find((l) => l.trim() && l.trim() !== "---") || "";
   }
   return description;
+}
+
+function listSkillDirNames(dir: string): Set<string> {
+  try {
+    return new Set(
+      fs.readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function inferSkillNameFromSlug(slug: string): string {
+  const atIndex = slug.lastIndexOf("@");
+  if (atIndex >= 0) return slug.slice(atIndex + 1);
+  return slug.split("/").pop() || slug;
+}
+
+function containsSkillsCliFailure(output: string): boolean {
+  return /(?:installation failed|failed to clone repository|canceled|cancelled|error\s*:)/i.test(stripAnsi(output));
+}
+
+function summarizeSkillsCliError(stdout: string, stderr: string, fallback: string): string {
+  const lines = stripAnsi(`${stderr}\n${stdout}`)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^[█╚═╗╔║ ]+$/.test(line))
+    .filter((line) => !line.includes("Tip: use the --yes"))
+    .filter((line) => !line.startsWith("T   skills"));
+  const important = lines.filter((line) => /failed|fatal|authentication|unable to access|error|canceled|cancelled|installation failed/i.test(line));
+  return (important.length > 0 ? important : lines).slice(0, 5).join("\n") || fallback;
+}
+
+function findInstalledSkillDir(skillName: string, dirs: string[]): string | null {
+  for (const dir of dirs) {
+    const candidate = path.join(dir, skillName);
+    if (fs.existsSync(path.join(candidate, "SKILL.md"))) return candidate;
+  }
+  return null;
+}
+
+function copyDirectoryRobust(sourceDir: string, destDir: string): void {
+  const stat = fs.statSync(sourceDir);
+  if (!stat.isDirectory()) {
+    fs.mkdirSync(path.dirname(destDir), { recursive: true });
+    fs.copyFileSync(sourceDir, destDir);
+    return;
+  }
+
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRobust(sourcePath, destPath);
+    } else if (entry.isSymbolicLink()) {
+      const target = fs.readlinkSync(sourcePath);
+      try {
+        fs.symlinkSync(target, destPath);
+      } catch {
+        const resolved = fs.realpathSync(sourcePath);
+        copyDirectoryRobust(resolved, destPath);
+      }
+    } else {
+      fs.copyFileSync(sourcePath, destPath);
+    }
+  }
+}
+
+function parseSkillsSlug(slug: string): { owner: string; repo: string; skillName: string; repoKey: string; repoUrl: string } | null {
+  const match = slug.match(/^([\w\-.]+)\/([\w\-.]+)(?:@([\w\-.]+))?$/);
+  if (!match) return null;
+  const owner = match[1]!;
+  const repo = match[2]!;
+  const skillName = match[3] || repo;
+  const repoKey = `${owner}/${repo}`;
+  return {
+    owner,
+    repo,
+    skillName,
+    repoKey,
+    repoUrl: `https://github.com/${repoKey}.git`,
+  };
+}
+
+function parseMirrorMap(raw: string | undefined): Record<string, string[]> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string | string[]>;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([key, value]) => [key.toLowerCase(), Array.isArray(value) ? value : [value]]),
+    );
+  } catch {
+    const entries: Record<string, string[]> = {};
+    for (const item of raw.split(/[;\n]/)) {
+      const [key, value] = item.split("=");
+      const repoKey = key?.trim().toLowerCase();
+      const url = value?.trim();
+      if (repoKey && url) entries[repoKey] = [...(entries[repoKey] || []), url];
+    }
+    return entries;
+  }
+}
+
+function uniqueStrings(items: string[]): string[] {
+  return Array.from(new Set(items.filter(Boolean)));
+}
+
+function githubMirrorUrls(repoKey: string, repoUrl: string): string[] {
+  const builtInMirrors: Record<string, string[]> = {
+    "sickn33/antigravity-awesome-skills": ["https://gitee.com/github-29244000/antigravity-awesome-skills.git"],
+  };
+  const configuredMirrors = parseMirrorMap(process.env.NANOBOT_SKILLS_REPO_MIRROR_MAP);
+  const mirrorPrefixes = (process.env.NANOBOT_GITHUB_MIRROR_PREFIXES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((prefix) => {
+      if (prefix.includes("{url}")) return prefix.replace("{url}", repoUrl);
+      if (prefix.includes("{repo}")) return prefix.replace("{repo}", repoKey);
+      return `${prefix.replace(/\/+$/, "")}/${repoUrl}`;
+    });
+
+  return uniqueStrings([
+    ...(configuredMirrors[repoKey.toLowerCase()] || []),
+    ...(builtInMirrors[repoKey.toLowerCase()] || []),
+    ...mirrorPrefixes,
+    repoUrl,
+  ]);
+}
+
+function cloneRepoFromAnyUrl(urls: string[], repoDir: string): { url: string; error?: string } {
+  let lastError = "";
+  for (const url of urls) {
+    try {
+      if (fs.existsSync(repoDir)) fs.rmSync(repoDir, { recursive: true, force: true });
+      execFileSync("git", ["clone", "--depth", "1", url, repoDir], { stdio: "pipe", timeout: 90000 });
+      return { url };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { url: "", error: lastError || "all clone attempts failed" };
+}
+
+function pickFallbackSkill(skills: GitSkillInfo[], requestedName: string): GitSkillInfo | null {
+  const exact = skills.find((skill) => skill.name === requestedName);
+  if (exact) return exact;
+
+  const loose = skills.filter((skill) => skill.name.toLowerCase().includes("superpower"));
+  if (requestedName.toLowerCase().includes("superpower") && loose.length === 1) {
+    return loose[0]!;
+  }
+
+  return null;
+}
+
+function installSkillFromGitFallback(slug: string, targetSkillsDir: string): { ok: boolean; output: string; name: string } {
+  const parsed = parseSkillsSlug(slug);
+  if (!parsed) throw new Error("invalid slug format");
+
+  const cacheDir = path.join(getMarketplacesDir(), "skills-cli-fallback-cache");
+  const repoDir = path.join(cacheDir, `${parsed.repo}-${hashString(slug)}`);
+  fs.mkdirSync(cacheDir, { recursive: true });
+
+  const urls = githubMirrorUrls(parsed.repoKey, parsed.repoUrl);
+  const cloned = cloneRepoFromAnyUrl(urls, repoDir);
+  if (!cloned.url) {
+    throw new Error(`skills.sh 安装失败，且镜像兜底也无法 clone ${parsed.repoKey}。可以设置 NANOBOT_SKILLS_REPO_MIRROR_MAP 指向可访问的 Gitee/私有镜像。${cloned.error ? `\n${cloned.error}` : ""}`);
+  }
+
+  const skills = scanForSkills(repoDir);
+  const selected = pickFallbackSkill(skills, parsed.skillName);
+  if (!selected) {
+    const names = skills.map((skill) => skill.name).slice(0, 20).join(", ");
+    throw new Error(`已从 ${cloned.url} clone 仓库，但没有找到技能 "${parsed.skillName}"。可用技能：${names || "无"}`);
+  }
+
+  const destDir = path.join(targetSkillsDir, selected.name);
+  if (fs.existsSync(destDir)) {
+    fs.rmSync(destDir, { recursive: true, force: true });
+  }
+  copyDirectoryRobust(selected.sourcePath, destDir);
+  if (!fs.existsSync(path.join(destDir, "SKILL.md"))) {
+    throw new Error(`镜像安装后缺少 SKILL.md: ${selected.name}`);
+  }
+
+  return {
+    ok: true,
+    output: `skills.sh clone 失败，已改用镜像仓库安装：${cloned.url}${selected.name !== parsed.skillName ? `\n请求技能 ${parsed.skillName} 未找到，已安装同仓库可用替代技能 ${selected.name}。` : ""}`,
+    name: selected.name,
+  };
 }
 
 /** Recursively scan a directory for skills (dirs with SKILL.md), searching up to 3 levels deep */
@@ -451,7 +647,7 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
     if (fs.existsSync(destDir)) {
       fs.rmSync(destDir, { recursive: true });
     }
-    fs.cpSync(pluginSourceDir, destDir, { recursive: true });
+    copyDirectoryRobust(pluginSourceDir, destDir);
 
     res.json({ ok: true, path: destDir });
   }));
@@ -523,8 +719,7 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
       return;
     }
 
-    const globalSkillsDir = path.join(os.homedir(), ".openclaw", "skills");
-    fs.mkdirSync(globalSkillsDir, { recursive: true });
+    const targetSkillsDir = await resolveSkillTargetDir(_config, undefined, parseSkillTarget(req.body as Record<string, unknown>));
 
     const installedSkills: string[] = [];
     const errors: string[] = [];
@@ -549,12 +744,12 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
         continue;
       }
 
-      const destDir = path.join(globalSkillsDir, safeName);
+      const destDir = path.join(targetSkillsDir, safeName);
       try {
         if (fs.existsSync(destDir)) {
           fs.rmSync(destDir, { recursive: true });
         }
-        fs.cpSync(sourcePath, destDir, { recursive: true });
+        copyDirectoryRobust(sourcePath, destDir);
         installedSkills.push(safeName);
       } catch (err) {
         errors.push(`Failed to install ${safeName}: ${(err as Error).message}`);
@@ -608,15 +803,14 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
       return;
     }
 
-    const globalSkillsDir = path.join(os.homedir(), ".openclaw", "skills");
-    fs.mkdirSync(globalSkillsDir, { recursive: true });
-    const destDir = path.join(globalSkillsDir, safeName);
+    const targetSkillsDir = await resolveSkillTargetDir(_config, undefined, parseSkillTarget(req.body as Record<string, unknown>));
+    const destDir = path.join(targetSkillsDir, safeName);
 
     try {
       if (fs.existsSync(destDir)) {
         fs.rmSync(destDir, { recursive: true });
       }
-      fs.cpSync(sourcePath, destDir, { recursive: true });
+      copyDirectoryRobust(sourcePath, destDir);
       res.json({ ok: true, name: safeName, path: destDir });
     } catch (err) {
       res.status(500).json({ detail: `Failed to install: ${(err as Error).message}` });
@@ -723,6 +917,15 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
     }
 
     try {
+      const target = parseSkillTarget(req.body as Record<string, unknown>);
+      const targetSkillsDir = await resolveSkillTargetDir(_config, undefined, target);
+      const globalSkillsDir = path.join(_config.openclawHome, "skills");
+      const sourceSkillDirs = [
+        globalSkillsDir,
+        path.join(os.homedir(), ".claude", "skills"),
+        path.join(os.homedir(), ".codex", "skills"),
+      ];
+      const beforeByDir = new Map(sourceSkillDirs.map((dir) => [dir, listSkillDirNames(dir)]));
       const stdout = await new Promise<string>((resolve, reject) => {
         exec(
           `npx --yes skills add ${slug} -g -y`,
@@ -734,12 +937,48 @@ export function marketplacesRoutes(_config: BridgeConfig): Router {
               .filter((l) => !l.startsWith("npm warn") && l.trim())
               .join("\n")
               .trim();
-            if (err && cleanStderr) reject(new Error(cleanStderr));
-            else resolve(stripAnsi(stdout || ""));
+            const cleanStdout = stripAnsi(stdout || "");
+            if (err || cleanStderr || containsSkillsCliFailure(cleanStdout)) {
+              reject(new Error(summarizeSkillsCliError(cleanStdout, cleanStderr, err?.message || "skills add failed")));
+            } else {
+              resolve(cleanStdout);
+            }
           },
         );
+      }).catch((cliErr) => {
+        try {
+          const fallback = installSkillFromGitFallback(slug, targetSkillsDir);
+          res.json(fallback);
+          return null;
+        } catch (fallbackErr) {
+          const cliMessage = cliErr instanceof Error ? cliErr.message : String(cliErr);
+          const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+          throw new Error(`${cliMessage}\n\n镜像兜底失败：${fallbackMessage}`);
+        }
       });
-      res.json({ ok: true, output: stdout.trim() });
+      if (stdout === null) return;
+      const inferredName = inferSkillNameFromSlug(slug);
+      const added = sourceSkillDirs.flatMap((dir) => {
+        const before = beforeByDir.get(dir) || new Set<string>();
+        const after = listSkillDirNames(dir);
+        return [...after].filter((name) => !before.has(name));
+      });
+      const installedName = added[0] || inferredName;
+      const sourceDir = findInstalledSkillDir(installedName, sourceSkillDirs);
+      if (!sourceDir) {
+        throw new Error(`Installed skill directory not found: ${installedName}`);
+      }
+      const destDir = path.join(targetSkillsDir, installedName);
+      if (path.resolve(sourceDir) !== path.resolve(destDir)) {
+        if (fs.existsSync(destDir)) {
+          fs.rmSync(destDir, { recursive: true, force: true });
+        }
+        copyDirectoryRobust(sourceDir, destDir);
+      }
+      if (!fs.existsSync(path.join(destDir, "SKILL.md"))) {
+        throw new Error(`Installed skill is missing SKILL.md: ${installedName}`);
+      }
+      res.json({ ok: true, output: stdout.trim(), name: installedName });
     } catch (err) {
       res.status(500).json({ detail: (err as Error).message });
     }

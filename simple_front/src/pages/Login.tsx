@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertCircle, ArrowRight, Bot, Loader2, LockKeyhole, Mail, User, Workflow } from 'lucide-react'
+import { ArrowRight, Bot, Loader2, LockKeyhole, Mail, User, Workflow } from 'lucide-react'
 import { login, register } from '../lib/api.ts'
 import ClearableInput from '../components/ui/ClearableInput.tsx'
+import { useToast } from '../components/ui/Toast.tsx'
 
 export default function Login() {
   const navigate = useNavigate()
@@ -11,15 +12,14 @@ export default function Login() {
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const toast = useToast()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!username.trim() || !password) return
     if (mode === 'register' && !email.trim()) return
     
-    setError('')
     setLoading(true)
 
     try {
@@ -30,7 +30,7 @@ export default function Login() {
       }
       navigate('/')
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '操作失败')
+      toast.error(err instanceof Error ? err.message : '操作失败')
     } finally {
       setLoading(false)
     }
@@ -96,13 +96,6 @@ export default function Login() {
             </div>
 
             <div className="rounded-[24px] border border-white/80 bg-white/82 p-5 shadow-xl shadow-cyan-950/10 backdrop-blur-xl">
-              {error && (
-                <div className="mb-4 flex items-start gap-2 rounded-2xl border border-accent-red/20 bg-accent-red/5 px-3 py-2.5 text-sm text-accent-red">
-                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                  <span>{error}</span>
-                </div>
-              )}
-
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <label htmlFor="auth-username" className="mb-1.5 block text-xs font-medium text-light-text-secondary">
@@ -191,7 +184,7 @@ export default function Login() {
                     还没有账号？{' '}
                     <button
                       type="button"
-                      onClick={() => { setMode('register'); setError('') }}
+                      onClick={() => setMode('register')}
                       className="cursor-pointer font-medium text-accent-blue transition-colors hover:text-cyan-700"
                     >
                       创建账号
@@ -202,7 +195,7 @@ export default function Login() {
                     已有账号？{' '}
                     <button
                       type="button"
-                      onClick={() => { setMode('login'); setError('') }}
+                      onClick={() => setMode('login')}
                       className="cursor-pointer font-medium text-accent-blue transition-colors hover:text-cyan-700"
                     >
                       返回登录

@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     openclaw_image: str = "openclaw:latest"
     deploy_version: str = ""
     container_network: str = "openclaw-internal"
+    skills_repo_mirror_map: str = ""
+    github_mirror_prefixes: str = ""
 
     # Shared OpenClaw runtime，共享openclaw容器时的参数
     shared_openclaw_enabled: bool = True

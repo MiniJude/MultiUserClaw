@@ -37,6 +37,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 # ── 平台检测 ─────────────────────────────────────────────────────────
 IS_WINDOWS = sys.platform == "win32"
@@ -51,6 +53,13 @@ DIM   = "\033[2m"
 RESET = "\033[0m"
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if IS_WINDOWS:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ── 服务配置 ──────────────────────────────────────────────────────────
 SERVICES = {
@@ -121,6 +130,62 @@ def wait_for_port(port: int, timeout: int = 30, name: str = "") -> bool:
         sys.stdout.write(f"\r  等待 {name or f'端口 {port}'}... ({i + 1}/{timeout}s)")
         sys.stdout.flush()
     print()
+    return False
+
+
+def http_get_ok(url: str, timeout: int = 5) -> bool:
+    """Return True when a local health URL returns any 2xx response."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def validate_local_chain(enabled: list[str], gateway_port: int = 8080) -> bool:
+    """Validate that the local dev services are not left in a half-started state."""
+    checks: list[tuple[str, object, str]] = []
+
+    if "gateway" in enabled:
+        checks.append((
+            "Platform Gateway /api/ping",
+            lambda: http_get_ok(f"http://localhost:{gateway_port}/api/ping", timeout=5),
+            f"http://localhost:{gateway_port}/api/ping",
+        ))
+    if "bridge" in enabled:
+        checks.append((
+            "OpenClaw Bridge API",
+            lambda: http_get_ok("http://127.0.0.1:18080/api/cron/jobs", timeout=8),
+            "http://127.0.0.1:18080/api/cron/jobs",
+        ))
+        checks.append((
+            "OpenClaw Gateway WS port",
+            lambda: is_port_in_use(18789),
+            "127.0.0.1:18789",
+        ))
+    if "simple" in enabled:
+        checks.append((
+            "Simple Front",
+            lambda: is_port_in_use(3085),
+            "http://127.0.0.1:3085",
+        ))
+
+    failed: list[tuple[str, str]] = []
+    for _ in range(12):
+        failed = []
+        for name, check, target in checks:
+            if not check():
+                failed.append((name, target))
+        if not failed:
+            success("本地开发链路校验通过")
+            return True
+        time.sleep(2)
+
+    error("本地开发链路不完整，可能导致页面 502 或 Gateway client not connected")
+    for name, target in failed:
+        print(f"  {RED}✗{RESET} {name}: {target}")
+    print(f"  {YELLOW}建议执行: python start_local.py --stop{RESET}")
+    print(f"  {YELLOW}然后执行: python start_local.py --repair-simple{RESET}")
     return False
 
 
@@ -239,7 +304,7 @@ def stop_postgres():
 
 # ── OpenClaw Bridge ───────────────────────────────────────────────────
 
-def start_bridge(env: dict) -> "subprocess.Popen | None":
+def start_bridge(env: dict, enable_channels: bool = True) -> "subprocess.Popen | None":
     log("启动 OpenClaw Bridge 后端 (端口 18080)...")
 
     if is_port_in_use(18080):
@@ -259,20 +324,41 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
         else:
             cmd = ["node", "bridge/dist/bridge/start.js"]
 
-    # 本地开发模式：启用渠道（飞书、Telegram 等），不跳过
-    bridge_env = _base_env(BRIDGE_ENABLE_CHANNELS="1", **env)
+    bridge_env = _base_env(**env)
+    if enable_channels:
+        # 本地开发默认启用渠道（飞书、Telegram 等），不跳过。
+        bridge_env["BRIDGE_ENABLE_CHANNELS"] = "1"
+    else:
+        # Simple Front 修复模式只需要网页聊天/Agent/Skill/Session 数据链路。
+        # 跳过局域网发现和外部 watcher，避免本机 mDNS/channel 残留导致 gateway 退出。
+        bridge_env.pop("BRIDGE_ENABLE_CHANNELS", None)
+        bridge_env.setdefault("OPENCLAW_DISABLE_BONJOUR", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_CHANNELS", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_GMAIL_WATCHER", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_CANVAS_HOST", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_PROVIDERS", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_CRON", "1")
+        bridge_env.setdefault("OPENCLAW_SKIP_BROWSER_CONTROL_SERVER", "1")
+
+    bridge_log = None
+    bridge_log_path = os.path.join(PROJECT_DIR, ".codex", "runlogs", "bridge-start.log")
+    stdout_target = subprocess.PIPE
+    if IS_WINDOWS:
+        os.makedirs(os.path.dirname(bridge_log_path), exist_ok=True)
+        bridge_log = open(bridge_log_path, "ab")
+        stdout_target = bridge_log
 
     proc = subprocess.Popen(
         cmd,
         cwd=bridge_dir,
         env=bridge_env,
-        stdout=subprocess.PIPE,
+        stdout=stdout_target,
         stderr=subprocess.STDOUT,
     )
     log(f"  PID: {proc.pid}")
 
     # 等待就绪，同时实时显示 bridge 输出以便诊断问题
-    timeout = 120
+    timeout = 300
     output_lines: list[str] = []
     bridge_color = SERVICES["bridge"]["color"]
 
@@ -284,6 +370,8 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
         if proc.poll() is not None:
             # 进程已退出，读取剩余输出
             _drain_output(proc, output_lines, bridge_color)
+            if IS_WINDOWS:
+                output_lines.extend(_read_log_tail(bridge_log_path, max_lines=40))
             exit_code = proc.returncode
             error(f"OpenClaw Bridge 启动失败 (exit code: {exit_code})")
             if output_lines:
@@ -298,6 +386,8 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
 
         if is_port_in_use(18080):
             success("OpenClaw Bridge 就绪 (端口 18080)")
+            if bridge_log:
+                bridge_log.close()
             return proc
 
         # 进度提示
@@ -314,13 +404,26 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
     print()
     # 超时
     _drain_output(proc, output_lines, bridge_color)
-    warn("OpenClaw Bridge 启动超时 (120s)，继续启动其他服务")
+    if IS_WINDOWS:
+        output_lines.extend(_read_log_tail(bridge_log_path, max_lines=40))
+    warn("OpenClaw Bridge 启动超时 (300s)")
     if output_lines:
         print(f"  {DIM}最近输出:{RESET}")
         for line in output_lines[-5:]:
             print(f"  {YELLOW}│{RESET} {line}")
         print()
-    return proc
+    proc.terminate()
+    if bridge_log:
+        bridge_log.close()
+    return None
+
+
+def _read_log_tail(path: str, max_lines: int = 40) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return [line.rstrip() for line in f.readlines()[-max_lines:] if line.rstrip()]
+    except OSError:
+        return []
 
 
 def _drain_output(proc: "subprocess.Popen", lines: list, color: str):
@@ -381,11 +484,14 @@ def _suggest_bridge_fix(output_lines: list):
 
 # ── Platform Gateway ──────────────────────────────────────────────────
 
-def start_gateway(env: dict) -> "subprocess.Popen | None":
-    log("启动 Platform Gateway (端口 8080)...")
+def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
+    log(f"启动 Platform Gateway (端口 {port})...")
 
-    if is_port_in_use(8080):
-        warn("端口 8080 已被占用，跳过 gateway")
+    if is_port_in_use(port):
+        if http_get_ok(f"http://localhost:{port}/api/ping", timeout=5):
+            success("Platform Gateway 已在运行")
+        else:
+            warn(f"端口 {port} 已被占用，但 /api/ping 未响应")
         return None
 
     proc_env = _base_env(
@@ -414,7 +520,7 @@ def start_gateway(env: dict) -> "subprocess.Popen | None":
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
-         "--host", "0.0.0.0", "--port", "8080", "--reload"],
+         "--host", "0.0.0.0", "--port", str(port), "--reload"],
         cwd=os.path.join(PROJECT_DIR, "platform"),
         env=proc_env,
         stdout=subprocess.PIPE,
@@ -536,6 +642,10 @@ def start_simple(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.
         **({"start_new_session": True} if not IS_WINDOWS else {}),
     )
     log(f"  PID: {proc.pid}")
+    if not wait_for_port(3085, timeout=30, name="Simple Front"):
+        error("Simple Front 启动超时")
+        proc.terminate()
+        return None
     return proc
 
 
@@ -607,29 +717,126 @@ def _stop_all_unix():
 
 
 def _stop_all_windows():
-    # 进程名 → 用 tasklist 过滤
-    image_names = ["openclaw.exe", "python.exe", "node.exe"]
-    for image in image_names:
+    patterns = [
+        "start_local.py",
+        "bridge/start.ts",
+        "bridge\\start.ts",
+        "openclaw.mjs gateway run",
+        "uvicorn app.main:app",
+        "vite",
+        "simple_front",
+        "frontend",
+        "manage_front",
+    ]
+
+    def kill_windows_process(pid: int) -> bool:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return result.returncode == 0
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        rows = json.loads(result.stdout)
+        if isinstance(rows, dict):
+            rows = [rows]
+    except Exception:
+        return
+
+    current_pid = os.getpid()
+    parent_by_pid: dict[int, int] = {}
+    for row in rows:
         try:
-            result = subprocess.run(
-                f'tasklist /FI "IMAGENAME eq {image}" /FO CSV /NH',
-                shell=True, capture_output=True, text=True,
-            )
-            for line in result.stdout.strip().split("\n"):
-                line = line.strip()
-                if not line or line.startswith("INFO:") or "," not in line:
-                    continue
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    pid = parts[1].strip('"').strip()
-                    if pid.isdigit():
-                        try:
-                            os.kill(int(pid), signal.SIGTERM)
-                            log(f"  终止进程 {pid} ({image})")
-                        except (ProcessLookupError, PermissionError, OSError):
-                            pass
+            parent_by_pid[int(row.get("ProcessId") or 0)] = int(row.get("ParentProcessId") or 0)
         except Exception:
-            pass
+            continue
+    protected_pids = {current_pid}
+    parent_pid = parent_by_pid.get(current_pid, 0)
+    while parent_pid and parent_pid not in protected_pids:
+        protected_pids.add(parent_pid)
+        parent_pid = parent_by_pid.get(parent_pid, 0)
+    project_markers = [
+        PROJECT_DIR.lower(),
+        PROJECT_DIR.replace("\\", "\\\\").lower(),
+    ]
+    precise_patterns = [
+        "start_local.py",
+        "bridge/start.ts",
+        "bridge\\start.ts",
+        "openclaw.mjs gateway run",
+        "uvicorn app.main:app",
+    ]
+    killed: set[int] = set()
+    for row in rows:
+        try:
+            pid = int(row.get("ProcessId") or 0)
+        except Exception:
+            continue
+        if pid <= 0 or pid in protected_pids:
+            continue
+        command = str(row.get("CommandLine") or "")
+        command_l = command.lower()
+        is_precise_match = any(pattern.lower() in command_l for pattern in precise_patterns)
+        is_project_match = (
+            any(marker in command_l for marker in project_markers)
+            and any(pattern.lower() in command_l for pattern in patterns)
+        )
+        if not (is_precise_match or is_project_match):
+            continue
+        if kill_windows_process(pid):
+            killed.add(pid)
+            log(f"  终止进程 {pid} ({row.get('Name')})")
+
+    # Some Windows-launched node processes have empty command lines. Clean owners of
+    # local dev ports as a second pass so --stop cannot leave a half-started chain.
+    try:
+        port_list = ",".join(str(SERVICES[name]["port"]) for name in ("bridge", "gateway", "frontend", "manage", "simple"))
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"Get-NetTCPConnection -LocalPort {port_list} -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.State -eq 'Listen' } | "
+                "Select-Object -ExpandProperty OwningProcess -Unique",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for raw_pid in result.stdout.splitlines():
+            raw_pid = raw_pid.strip()
+            if not raw_pid.isdigit():
+                continue
+            pid = int(raw_pid)
+            if pid <= 0 or pid in protected_pids or pid in killed:
+                continue
+            if kill_windows_process(pid):
+                log(f"  终止端口占用进程 {pid}")
+    except Exception:
+        pass
 
 
 # ── deploy_copy 同步 ─────────────────────────────────────────────────
@@ -778,9 +985,9 @@ def _register_agents_in_config(config_path: str, agents: list):
         return
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError):
         return
 
     if "agents" not in config:
@@ -809,7 +1016,7 @@ def _register_agents_in_config(config_path: str, agents: list):
             changed = True
 
     if changed:
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
 
 
@@ -877,27 +1084,27 @@ def _merge_openclaw_defaults(defaults_path: str, config_path: str):
     如果 openclaw.json 不存在，直接深拷贝 defaults 作为初始配置。
     """
     try:
-        with open(defaults_path) as f:
+        with open(defaults_path, encoding="utf-8") as f:
             defaults = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError):
         return
 
     if not os.path.isfile(config_path):
         # 配置文件不存在，直接用 defaults 创建
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(defaults, f, indent=2, ensure_ascii=False)
         log("  从 openclaw_defaults.json 创建 openclaw.json")
         return
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError):
         return
 
     if _deep_merge(config, defaults):
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         log("  深度合并 openclaw_defaults.json → openclaw.json")
 
@@ -907,6 +1114,11 @@ def _merge_openclaw_defaults(defaults_path: str, config_path: str):
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw 本地开发启动脚本")
     parser.add_argument("--stop", action="store_true", help="停止所有本地服务")
+    parser.add_argument(
+        "--repair-simple",
+        action="store_true",
+        help="一键修复 Simple Front 本地链路：清理残留进程并稳定启动 db,bridge,gateway,simple",
+    )
     parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,bridge,gateway,frontend,manage,simple)")
     parser.add_argument("--skip", type=str, help="跳过指定服务，逗号分隔")
     parser.add_argument("--no-tail", action="store_true", help="不跟踪日志输出")
@@ -937,6 +1149,15 @@ def main():
     if args.stop:
         stop_all()
         return
+
+    if args.repair_simple:
+        log("Simple Front 本地链路修复：清理残留进程...")
+        stop_all()
+        time.sleep(2)
+        args.only = "db,bridge,gateway,simple"
+        args.skip = ""
+        args.local_only = True
+        args.api_url = "http://127.0.0.1:18081"
 
     # 解析要启动的服务
     all_services = ["db", "bridge", "gateway", "frontend", "manage", "simple"]
@@ -982,6 +1203,17 @@ def main():
 
     processes: dict = {}
     extra_env: dict = {}
+    gateway_port = 18081 if args.repair_simple else 8080
+    if args.repair_simple:
+        extra_env.update({
+            "OPENCLAW_DISABLE_BONJOUR": "1",
+            "OPENCLAW_SKIP_CHANNELS": "1",
+            "OPENCLAW_SKIP_GMAIL_WATCHER": "1",
+            "OPENCLAW_SKIP_CANVAS_HOST": "1",
+            "OPENCLAW_SKIP_PROVIDERS": "1",
+            "OPENCLAW_SKIP_CRON": "1",
+            "OPENCLAW_SKIP_BROWSER_CONTROL_SERVER": "1",
+        })
 
     # Read .env and forward model config to bridge
     env_path = os.path.join(PROJECT_DIR, ".env")
@@ -1010,13 +1242,15 @@ def main():
 
         # 2. OpenClaw Bridge 后端（含就绪等待，gateway 代理依赖它）
         if "bridge" in enabled:
-            proc = start_bridge(extra_env)
+            proc = start_bridge(extra_env, enable_channels=not args.repair_simple)
             if proc:
                 processes["bridge"] = proc
+            elif args.repair_simple:
+                sys.exit(1)
 
         # 3. Platform Gateway
         if "gateway" in enabled:
-            proc = start_gateway(extra_env)
+            proc = start_gateway(extra_env, port=gateway_port)
             if proc:
                 processes["gateway"] = proc
 
@@ -1042,6 +1276,11 @@ def main():
             if proc:
                 processes["simple"] = proc
 
+        # 启动后做完整链路校验，避免留下只启动了部分服务的半断链状态。
+        if any(svc in enabled for svc in ("bridge", "gateway", "simple")):
+            if not validate_local_chain(enabled, gateway_port=gateway_port):
+                sys.exit(1)
+
         if not processes:
             success("所有服务已就绪（使用已有实例）")
             return
@@ -1055,11 +1294,17 @@ def main():
             svc = SERVICES[svc_id]
             if svc_id == "db":
                 pid_info = "Docker 容器"
+                url_port = svc["port"]
+            elif svc_id == "gateway":
+                pid_info = f"PID {processes[svc_id].pid}" if svc_id in processes and processes[svc_id] else "已有实例"
+                url_port = gateway_port
             elif svc_id in processes and processes[svc_id]:
                 pid_info = f"PID {processes[svc_id].pid}"
+                url_port = svc["port"]
             else:
                 pid_info = "已有实例"
-            print(f"  {svc['color']}{svc['name']:>20}{RESET}  http://{display_host}:{svc['port']}  ({pid_info})")
+                url_port = svc["port"]
+            print(f"  {svc['color']}{svc['name']:>20}{RESET}  http://{display_host}:{url_port}  ({pid_info})")
         if "frontend" in enabled:
             print(f"  {DIM}Frontend 绑定: {frontend_host} | VITE_API_URL={frontend_api_url}{RESET}")
         if not args.local_only and lan_ip != "127.0.0.1":
