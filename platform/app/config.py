@@ -61,6 +61,33 @@ class Settings(BaseSettings):
     container_shm_size: str = "1g"
     container_data_dir: str = "/data/openclaw-users"
 
+    # Per-user OpenViking memory sidecar.
+    # Disabled by default because OpenViking needs its own model/provider config.
+    # When enabled, each dedicated user gets:
+    #   openviking-user-<user-id-prefix> + openviking-data-<user-id-prefix>
+    user_openviking_enabled: bool = False
+    user_openviking_image: str = "ghcr.io/volcengine/openviking:latest"
+    user_openviking_port: int = 1933
+    user_openviking_memory_limit: str = "1g"
+    user_openviking_cpu_limit: float = 1.0
+    user_openviking_api_key: str = ""
+    user_openviking_conf_content: str = ""
+    user_openviking_install_plugin: bool = True
+    user_openviking_force_unsafe_plugin_install: bool = True
+    user_openviking_embedding_provider: str = "minimax"
+    user_openviking_embedding_model: str = "embo-01"
+    user_openviking_embedding_api_base: str = "https://api.minimax.chat/v1/embeddings"
+    user_openviking_embedding_dimension: int = 1536
+    user_openviking_embedding_input: str = "text"
+    user_openviking_embedding_max_concurrent: int = 2
+    user_openviking_embedding_max_input_tokens: int = 2048
+    user_openviking_vlm_provider: str = "openai"
+    user_openviking_vlm_model: str = "deepseek-chat"
+    user_openviking_vlm_api_base: str = "https://api.deepseek.com/v1"
+    user_openviking_vlm_temperature: float = 0.0
+    user_openviking_vlm_timeout: int = 90
+    user_openviking_vlm_max_concurrent: int = 2
+
     # Idle management
     container_idle_pause_minutes: int = 30
     container_idle_archive_days: int = 30

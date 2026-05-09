@@ -7,6 +7,7 @@ import Settings from './pages/Settings.tsx'
 import KnowledgeBase from './pages/KnowledgeBase.tsx'
 import CronJobs from './pages/CronJobs.tsx'
 import SkillStore from './pages/SkillStore.tsx'
+import OpenViking from './pages/OpenViking.tsx'
 import { isLoggedIn } from './lib/api.ts'
 import { ToastProvider } from './components/ui/Toast.tsx'
 
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="dashboard/knowledge" element={<Navigate to="/knowledge" replace />} />
           <Route path="knowledge" element={<KnowledgeBase />} />
           <Route path="skills" element={<SkillStore />} />
+          <Route path="openviking" element={<OpenViking />} />
           <Route path="cron" element={<CronJobs />} />
           <Route path="settings" element={<Settings />} />
           <Route path="chat" element={<Chat />} />

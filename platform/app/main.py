@@ -13,7 +13,7 @@ from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
 from app.logging_setup import setup_logging, log_settings_summary
-from app.routes import auth, llm, proxy, admin, shared_openclaw
+from app.routes import auth, llm, proxy, admin, shared_openclaw, openviking
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -169,6 +169,7 @@ app.include_router(llm.router)
 app.include_router(proxy.router)
 # 对于共享openclaw的路由api注册
 app.include_router(shared_openclaw.router)
+app.include_router(openviking.router)
 app.include_router(admin.router)
 
 

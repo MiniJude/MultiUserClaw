@@ -201,6 +201,90 @@ export interface AgentRunWaitResult {
   error: unknown
 }
 
+export type OpenVikingEnvelope<T = unknown> = {
+  status?: string
+  result?: T
+  error?: unknown
+  telemetry?: unknown
+}
+
+export type OpenVikingSummary = {
+  sidecar?: {
+    name?: string
+    status?: string
+    healthy?: boolean
+    health?: string | null
+    image?: string
+    error?: string
+  }
+  health?: OpenVikingEnvelope<Record<string, unknown>>
+  ready?: Record<string, unknown>
+  system?: OpenVikingEnvelope<Record<string, unknown>>
+  memoryStats?: OpenVikingEnvelope<{
+    total_memories?: number
+    by_category?: Record<string, number>
+    hotness_distribution?: Record<string, number>
+    staleness?: Record<string, number>
+  }>
+  queue?: OpenVikingEnvelope<{
+    name?: string
+    is_healthy?: boolean
+    has_errors?: boolean
+    status?: string
+  }>
+  models?: OpenVikingEnvelope<{
+    name?: string
+    is_healthy?: boolean
+    has_errors?: boolean
+    status?: string
+  }>
+  retrieval?: OpenVikingEnvelope<{
+    name?: string
+    is_healthy?: boolean
+    has_errors?: boolean
+    status?: string
+  }>
+  vectorCount?: OpenVikingEnvelope<{ count?: number }>
+  errors?: Record<string, string>
+  recentLogs?: string[]
+}
+
+export type OpenVikingSession = {
+  session_id?: string
+  uri?: string
+  is_dir?: boolean
+  [key: string]: unknown
+}
+
+export type OpenVikingSearchInput = {
+  query: string
+  target_uri?: string
+  limit?: number
+  score_threshold?: number | null
+  include_provenance?: boolean
+}
+
+export type OpenVikingWriteMemoryInput = {
+  uri: string
+  content: string
+  mode?: 'replace' | 'append' | string
+  wait?: boolean
+  timeout?: number | null
+}
+
+export type OpenVikingMemoryCard = {
+  uri: string
+  title: string
+  category: string
+  categoryLabel: string
+  content: string
+  abstract?: string
+  size?: number
+  modified?: string
+  path?: string
+  readError?: string | null
+}
+
 export interface FileEntry {
   name: string
   path: string
@@ -344,6 +428,71 @@ export async function fetchJSON<T>(
   }
 
   return res.json() as Promise<T>
+}
+
+export async function getOpenVikingSummary(): Promise<OpenVikingSummary> {
+  return fetchJSON<OpenVikingSummary>('/api/openviking/summary')
+}
+
+export async function listOpenVikingSessions(): Promise<OpenVikingEnvelope<OpenVikingSession[]>> {
+  return fetchJSON<OpenVikingEnvelope<OpenVikingSession[]>>('/api/openviking/sessions')
+}
+
+export async function searchOpenViking(input: OpenVikingSearchInput): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>('/api/openviking/search', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function listOpenVikingMemories(limit = 30): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>(`/api/openviking/memories?limit=${encodeURIComponent(String(limit))}`)
+}
+
+export async function listOpenVikingMemoryCards(limit = 60): Promise<OpenVikingEnvelope<{
+  root: string
+  memories: OpenVikingMemoryCard[]
+  categories: Record<string, string>
+}>> {
+  return fetchJSON<OpenVikingEnvelope<{
+    root: string
+    memories: OpenVikingMemoryCard[]
+    categories: Record<string, string>
+  }>>(`/api/openviking/memories/list?limit=${encodeURIComponent(String(limit))}`)
+}
+
+export async function getOpenVikingSessionContext(sessionId: string): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>(
+    `/api/openviking/sessions/${encodeURIComponent(sessionId)}/context`,
+  )
+}
+
+export async function commitOpenVikingSession(sessionId: string): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>(
+    `/api/openviking/sessions/${encodeURIComponent(sessionId)}/commit`,
+    { method: 'POST' },
+  )
+}
+
+export async function extractOpenVikingSession(sessionId: string): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>(
+    `/api/openviking/sessions/${encodeURIComponent(sessionId)}/extract`,
+    { method: 'POST' },
+  )
+}
+
+export async function writeOpenVikingMemory(input: OpenVikingWriteMemoryInput): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>('/api/openviking/memory/write', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function waitOpenVikingProcessed(timeout = 30): Promise<OpenVikingEnvelope<unknown>> {
+  return fetchJSON<OpenVikingEnvelope<unknown>>(
+    `/api/openviking/system/wait?timeout=${encodeURIComponent(String(timeout))}`,
+    { method: 'POST' },
+  )
 }
 
 // ---------------------------------------------------------------------------

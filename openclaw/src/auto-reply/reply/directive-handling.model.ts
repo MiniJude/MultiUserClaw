@@ -7,8 +7,8 @@ import {
   resolveModelRefFromString,
 } from "../../agents/model-selection.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
-import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -202,6 +202,7 @@ export async function maybeHandleModelDirectiveInfo(params: {
   aliasIndex: ModelAliasIndex;
   allowedModelCatalog: Array<{ provider: string; id?: string; name?: string }>;
   resetModelOverride: boolean;
+  workspaceDir?: string;
   surface?: string;
   sessionEntry?: Pick<SessionEntry, "modelProvider" | "model">;
 }): Promise<ReplyPayload | undefined> {
@@ -234,6 +235,12 @@ export async function maybeHandleModelDirectiveInfo(params: {
     const reply = await resolveModelsCommandReply({
       cfg: params.cfg,
       commandBodyNormalized: "/models",
+      surface: params.surface,
+      currentModel: `${params.provider}/${params.model}`,
+      agentId: params.activeAgentId,
+      agentDir: params.agentDir,
+      workspaceDir: params.workspaceDir,
+      sessionEntry: isCompleteSessionEntry(params.sessionEntry) ? params.sessionEntry : undefined,
     });
     return reply ?? { text: "No models available." };
   }
@@ -272,6 +279,7 @@ export async function maybeHandleModelDirectiveInfo(params: {
         activeRuntimeLine,
         "",
         "Switch: /model <provider/model>",
+        "Runtime: /model <provider/model> --runtime <runtime>",
         "Browse: /models (providers) or /models <provider> (models)",
         "More: /model status",
       ]
@@ -299,6 +307,7 @@ export async function maybeHandleModelDirectiveInfo(params: {
       modelsPath,
       params.agentDir,
       authMode,
+      params.workspaceDir,
     );
     authByProvider.set(provider, formatAuthLabel(auth));
   }
@@ -353,4 +362,14 @@ export async function maybeHandleModelDirectiveInfo(params: {
     }
   }
   return { text: lines.join("\n") };
+}
+
+function isCompleteSessionEntry(
+  entry: Pick<SessionEntry, "modelProvider" | "model"> | undefined,
+): entry is SessionEntry {
+  return Boolean(
+    entry &&
+    typeof (entry as Partial<SessionEntry>).sessionId === "string" &&
+    typeof (entry as Partial<SessionEntry>).updatedAt === "number",
+  );
 }

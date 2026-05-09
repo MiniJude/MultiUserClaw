@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import hmac
+import json
+import logging
 import secrets
 import tarfile
 import time
@@ -18,6 +22,7 @@ from app.config import settings
 from app.db.models import Container, User, UserPortBinding
 
 _client: docker.DockerClient | None = None
+logger = logging.getLogger(__name__)
 
 
 def _docker() -> docker.DockerClient:
@@ -65,6 +70,310 @@ def _is_host_port_in_use(client: docker.DockerClient, host_port: int) -> bool:
 
 def _expected_container_name(user_id: str) -> str:
     return f"openclaw-user-{user_id[:8]}"
+
+
+def _expected_openviking_name(user_id: str) -> str:
+    return f"openviking-user-{user_id[:8]}"
+
+
+def _expected_openviking_volume(user_id: str) -> str:
+    return f"openviking-data-{user_id[:8]}"
+
+
+def _openviking_api_key_for_user(user_id: str) -> str:
+    if settings.user_openviking_api_key:
+        return settings.user_openviking_api_key
+    secret = settings.jwt_secret or "openclaw-openviking-dev-secret"
+    digest = hmac.new(secret.encode("utf-8"), user_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"ov_{digest}"
+
+
+def _build_openviking_plugin_config(user_id: str) -> dict:
+    short_id = user_id[:8]
+    sidecar_name = _expected_openviking_name(user_id)
+    config: dict[str, object] = {
+        "baseUrl": f"http://{sidecar_name}:{settings.user_openviking_port}",
+        "agent_prefix": f"user-{short_id}",
+        "accountId": f"user-{short_id}",
+        "userId": user_id,
+    }
+    config["apiKey"] = _openviking_api_key_for_user(user_id)
+    return {
+        "plugins": {
+            "enabled": True,
+            "allow": ["openviking"],
+            "slots": {
+                "contextEngine": "openviking",
+            },
+            "entries": {
+                "openviking": {
+                    "enabled": True,
+                    "hooks": {
+                        "allowConversationAccess": True,
+                    },
+                    "config": config,
+                },
+            },
+        },
+    }
+
+
+def _build_default_openviking_conf(user_id: str) -> str:
+    """Return the explicit platform-managed OpenViking server config."""
+    config = {
+        "storage": {
+            "workspace": "/app/.openviking/data",
+            "agfs": {
+                "backend": "local",
+                "timeout": 10,
+            },
+            "vectordb": {
+                "backend": "local",
+            },
+        },
+        "server": {
+            "host": "0.0.0.0",
+            "port": settings.user_openviking_port,
+            "auth_mode": "trusted",
+            "root_api_key": _openviking_api_key_for_user(user_id),
+            "cors_origins": ["*"],
+        },
+        "retrieval": {
+            "hotness_alpha": 0.0,
+            "score_propagation_alpha": 0.5,
+        },
+    }
+    embedding_api_key = _openviking_embedding_api_key()
+    if embedding_api_key:
+        config["embedding"] = {
+            "dense": {
+                "provider": settings.user_openviking_embedding_provider,
+                "model": settings.user_openviking_embedding_model,
+                "api_key": embedding_api_key,
+                "api_base": settings.user_openviking_embedding_api_base,
+                "dimension": settings.user_openviking_embedding_dimension,
+                "input": settings.user_openviking_embedding_input,
+            },
+            "max_concurrent": settings.user_openviking_embedding_max_concurrent,
+            "max_retries": 2,
+            "max_input_tokens": settings.user_openviking_embedding_max_input_tokens,
+        }
+    vlm_api_key = _openviking_vlm_api_key()
+    if vlm_api_key:
+        config["vlm"] = {
+            "model": settings.user_openviking_vlm_model,
+            "provider": settings.user_openviking_vlm_provider,
+            "api_key": vlm_api_key,
+            "api_base": settings.user_openviking_vlm_api_base,
+            "temperature": settings.user_openviking_vlm_temperature,
+            "timeout": settings.user_openviking_vlm_timeout,
+            "max_concurrent": settings.user_openviking_vlm_max_concurrent,
+        }
+    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+
+
+def _openviking_embedding_api_key() -> str:
+    provider = settings.user_openviking_embedding_provider.lower()
+    if provider == "minimax":
+        return settings.minimax_api_key
+    if provider == "dashscope":
+        return settings.dashscope_api_key
+    if provider in {"openai", "azure"}:
+        return settings.openai_api_key
+    if provider == "jina":
+        return settings.aihubmix_api_key
+    if provider == "volcengine":
+        return settings.doubao_api_key
+    return ""
+
+
+def _openviking_vlm_api_key() -> str:
+    provider = settings.user_openviking_vlm_provider.lower()
+    model = settings.user_openviking_vlm_model.lower()
+    if "deepseek" in model:
+        return settings.deepseek_api_key
+    if provider == "openai":
+        return settings.openai_api_key
+    if provider == "kimi":
+        return settings.kimi_api_key or settings.moonshot_api_key
+    if provider == "glm":
+        return settings.zhipu_api_key
+    if provider == "volcengine":
+        return settings.doubao_api_key
+    if "minimax" in model:
+        return settings.minimax_api_key
+    return ""
+
+
+def _merge_openclaw_config_patch(data_volume: str, patch: dict) -> None:
+    """Merge a patch into /root/.openclaw/openclaw.json stored in a Docker volume."""
+    client = _docker()
+    patch_json = json.dumps(patch, ensure_ascii=False)
+    script = r"""
+import json
+import os
+from pathlib import Path
+
+path = Path("/data/openclaw.json")
+patch = json.loads(os.environ["OPENCLAW_CONFIG_PATCH"])
+
+def merge(dst, src):
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            merge(dst[key], value)
+        elif isinstance(value, list) and isinstance(dst.get(key), list):
+            for item in value:
+                if item not in dst[key]:
+                    dst[key].append(item)
+        else:
+            dst[key] = value
+    return dst
+
+if path.exists():
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        config = {}
+else:
+    config = {}
+
+merge(config, patch)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+"""
+    client.containers.run(
+        image="python:3.13-alpine",
+        command=["python", "-c", script],
+        environment={"OPENCLAW_CONFIG_PATCH": patch_json},
+        volumes={data_volume: {"bind": "/data", "mode": "rw"}},
+        remove=True,
+        detach=False,
+    )
+
+
+def _ensure_openviking_sidecar(user_id: str) -> docker.models.containers.Container | None:
+    """Ensure a per-user OpenViking sidecar exists and is running."""
+    if not settings.user_openviking_enabled:
+        return None
+
+    _ensure_network()
+    client = _docker()
+    sidecar_name = _expected_openviking_name(user_id)
+    data_volume = _expected_openviking_volume(user_id)
+
+    try:
+        sidecar = client.containers.get(sidecar_name)
+        if sidecar.status == "paused":
+            sidecar.unpause()
+            sidecar.reload()
+        elif sidecar.status != "running":
+            sidecar.start()
+            sidecar.reload()
+        return sidecar
+    except DockerNotFound:
+        pass
+
+    environment = {
+        "TZ": settings.container_tz,
+    }
+    environment["OPENVIKING_CONF_CONTENT"] = (
+        settings.user_openviking_conf_content or _build_default_openviking_conf(user_id)
+    )
+    environment["OPENVIKING_API_KEY"] = _openviking_api_key_for_user(user_id)
+
+    return client.containers.run(
+        image=settings.user_openviking_image,
+        name=sidecar_name,
+        detach=True,
+        environment=environment,
+        mounts=[
+            docker.types.Mount("/app/.openviking", data_volume, type="volume"),
+        ],
+        network=settings.container_network,
+        mem_limit=settings.user_openviking_memory_limit,
+        nano_cpus=int(settings.user_openviking_cpu_limit * 1e9),
+        restart_policy={"Name": "unless-stopped"},
+        labels={
+            "openclaw.user_id": user_id,
+            "openclaw.sidecar": "openviking",
+        },
+    )
+
+
+def _openviking_sidecar_exists(user_id: str) -> bool:
+    if not settings.user_openviking_enabled:
+        return False
+    try:
+        _docker().containers.get(_expected_openviking_name(user_id))
+        return True
+    except DockerNotFound:
+        return False
+
+
+def _patch_openviking_plugin_config(user_id: str, data_volume: str) -> None:
+    if not settings.user_openviking_enabled:
+        return
+    _merge_openclaw_config_patch(data_volume, _build_openviking_plugin_config(user_id))
+
+
+def _install_openviking_plugin(container: docker.models.containers.Container) -> bool:
+    """Best-effort install of the OpenViking OpenClaw plugin inside a user container."""
+    if not settings.user_openviking_enabled or not settings.user_openviking_install_plugin:
+        return False
+
+    force_flag = (
+        " --dangerously-force-unsafe-install"
+        if settings.user_openviking_force_unsafe_plugin_install
+        else ""
+    )
+    command = (
+        "test -d /root/.openclaw/extensions/openviking "
+        f"|| node /app/openclaw.mjs plugins install{force_flag} clawhub:@openclaw/openviking"
+    )
+    exit_code, output = container.exec_run(
+        cmd=["sh", "-lc", command],
+        user="root",
+        demux=True,
+    )
+    if exit_code != 0:
+        stdout = (output[0] or b"").decode("utf-8", errors="replace") if output else ""
+        stderr = (output[1] or b"").decode("utf-8", errors="replace") if output else ""
+        logger.warning(
+            "OpenViking plugin install failed for %s: exit=%s stdout=%s stderr=%s",
+            container.name,
+            exit_code,
+            stdout[-1000:],
+            stderr[-1000:],
+        )
+        return False
+    return True
+
+
+def _stop_or_pause_openviking_sidecar(user_id: str, pause: bool) -> None:
+    if not settings.user_openviking_enabled:
+        return
+    client = _docker()
+    try:
+        sidecar = client.containers.get(_expected_openviking_name(user_id))
+        if pause and sidecar.status == "running":
+            sidecar.pause()
+        elif not pause and sidecar.status in {"running", "paused"}:
+            if sidecar.status == "paused":
+                sidecar.unpause()
+            sidecar.stop(timeout=10)
+    except DockerNotFound:
+        pass
+
+
+def _container_uses_current_image(container: docker.models.containers.Container) -> bool:
+    """Return whether a user container was created from the configured image id."""
+    try:
+        current_image = _docker().images.get(settings.openclaw_image)
+        container.reload()
+        return container.attrs.get("Image") == current_image.id
+    except Exception:
+        # If Docker cannot resolve the image, avoid forcing a recreate loop.
+        return True
 
 
 async def _recreate_container_record(db: AsyncSession, record: Container, existing_container=None) -> Container:
@@ -281,6 +590,16 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     except DockerNotFound:
         pass
 
+    if settings.user_openviking_enabled:
+        # The sidecar and plugin config are user-scoped. Patch the OpenClaw
+        # volume before first boot so the bridge startup merge preserves it.
+        try:
+            _ensure_openviking_sidecar(user_id)
+            _patch_openviking_plugin_config(user_id, data_vol)
+        except Exception:
+            await db.rollback()
+            raise
+
     # Fetch user's SSO token if available (e.g. InfoX-Med)
     # user_result = await db.execute(select(User).where(User.id == user_id))
     # user_row = user_result.scalar_one_or_none()
@@ -370,6 +689,10 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         public_base_url=settings.public_base_url,
     )
     _write_expose_port_skill(docker_container, expose_markdown)
+    plugin_ready = _install_openviking_plugin(docker_container)
+    if plugin_ready:
+        docker_container.restart(timeout=10)
+        docker_container.reload()
 
     network_settings = docker_container.attrs["NetworkSettings"]["Networks"]
     internal_ip = network_settings.get(settings.container_network, {}).get("IPAddress", "")
@@ -418,11 +741,16 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             raise RuntimeError("Container creation timed out")
 
     client = _docker()
+    sidecar_missing = settings.user_openviking_enabled and not _openviking_sidecar_exists(user_id)
+    if settings.user_openviking_enabled:
+        _ensure_openviking_sidecar(user_id)
 
     if record.docker_id:
         try:
             c = client.containers.get(record.docker_id)
             if c.name != _expected_container_name(user_id):
+                return await _recreate_container_record(db, record, c)
+            if not _container_uses_current_image(c):
                 return await _recreate_container_record(db, record, c)
         except DockerNotFound:
             await db.delete(record)
@@ -461,6 +789,14 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             if c.status != "running":
                 c.start()
                 c.reload()
+            if settings.user_openviking_enabled:
+                data_vol = f"openclaw-data-{user_id[:8]}"
+                _patch_openviking_plugin_config(user_id, data_vol)
+                if sidecar_missing:
+                    plugin_ready = _install_openviking_plugin(c)
+                    if plugin_ready:
+                        c.restart(timeout=10)
+                        c.reload()
             # Sync internal IP — it may change after container restart
             nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
             for net_info in nets.values():
@@ -490,6 +826,7 @@ async def pause_container(db: AsyncSession, user_id: str) -> bool:
     try:
         c = client.containers.get(record.docker_id)
         c.pause()
+        _stop_or_pause_openviking_sidecar(user_id, pause=True)
         await db.execute(
             update(Container).where(Container.id == record.id).values(status="paused")
         )
@@ -510,6 +847,8 @@ async def resume_container(db: AsyncSession, user_id: str) -> bool:
 
     client = _docker()
     try:
+        if settings.user_openviking_enabled:
+            _ensure_openviking_sidecar(user_id)
         c = client.containers.get(record.docker_id)
         
         if record.status == "paused":
@@ -541,6 +880,7 @@ async def destroy_container(db: AsyncSession, user_id: str) -> bool:
         c.remove()
     except DockerNotFound:
         pass
+    _stop_or_pause_openviking_sidecar(user_id, pause=False)
 
     await db.delete(record)
     await db.commit()
