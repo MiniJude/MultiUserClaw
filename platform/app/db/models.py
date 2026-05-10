@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    ForeignKey,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -103,6 +104,41 @@ class UsageRecord(Base):
 
     __table_args__ = (
         Index('idx_usage_user_created', 'user_id', 'created_at'),
+    )
+
+
+class FastChatSession(Base):
+    """Lightweight platform-native chat session for low-latency conversations."""
+
+    __tablename__ = "fast_chat_sessions"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False, default="main", index=True)
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class FastChatMessage(Base):
+    """Message row for lightweight platform-native chat sessions."""
+
+    __tablename__ = "fast_chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_key: Mapped[str] = mapped_column(
+        String(160),
+        ForeignKey("fast_chat_sessions.key", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_fast_chat_messages_session_created", "session_key", "created_at"),
     )
 
 

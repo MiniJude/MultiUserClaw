@@ -496,6 +496,7 @@ def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
 
     proc_env = _base_env(
         PLATFORM_DATABASE_URL="postgresql+asyncpg://nanobot:nanobot@localhost:5432/nanobot_platform",
+        PLATFORM_PORT=str(port),
         # 本地开发模式：直接代理到本机 openclaw web，跳过 Docker 容器管理
         PLATFORM_DEV_OPENCLAW_URL="http://127.0.0.1:18080",
         # WebSocket 直连 OpenClaw Gateway（跳过 Bridge 的聊天中转）
@@ -740,6 +741,20 @@ def _stop_all_windows():
         )
         return result.returncode == 0
 
+    def is_docker_desktop_process(row: dict) -> bool:
+        """Do not taskkill Docker Desktop internals while cleaning local dev ports."""
+        name = str(row.get("Name") or "").lower()
+        command = str(row.get("CommandLine") or "").lower()
+        docker_markers = (
+            "docker",
+            "com.docker",
+            "docker desktop",
+            "wsl.exe",
+            "wslhost.exe",
+            "vmmem",
+        )
+        return any(marker in name or marker in command for marker in docker_markers)
+
     try:
         result = subprocess.run(
             [
@@ -765,9 +780,12 @@ def _stop_all_windows():
 
     current_pid = os.getpid()
     parent_by_pid: dict[int, int] = {}
+    row_by_pid: dict[int, dict] = {}
     for row in rows:
         try:
-            parent_by_pid[int(row.get("ProcessId") or 0)] = int(row.get("ParentProcessId") or 0)
+            pid = int(row.get("ProcessId") or 0)
+            parent_by_pid[pid] = int(row.get("ParentProcessId") or 0)
+            row_by_pid[pid] = row
         except Exception:
             continue
     protected_pids = {current_pid}
@@ -793,6 +811,8 @@ def _stop_all_windows():
         except Exception:
             continue
         if pid <= 0 or pid in protected_pids:
+            continue
+        if is_docker_desktop_process(row):
             continue
         command = str(row.get("CommandLine") or "")
         command_l = command.lower()
@@ -832,6 +852,10 @@ def _stop_all_windows():
                 continue
             pid = int(raw_pid)
             if pid <= 0 or pid in protected_pids or pid in killed:
+                continue
+            row = row_by_pid.get(pid, {})
+            if is_docker_desktop_process(row):
+                log(f"  跳过 Docker Desktop 端口代理进程 {pid}")
                 continue
             if kill_windows_process(pid):
                 log(f"  终止端口占用进程 {pid}")
@@ -1119,6 +1143,11 @@ def main():
         action="store_true",
         help="一键修复 Simple Front 本地链路：清理残留进程并稳定启动 db,bridge,gateway,simple",
     )
+    parser.add_argument(
+        "--fast-local",
+        action="store_true",
+        help="一键启动低延迟本地链路：Docker PostgreSQL + 本地 Platform Gateway + 本地 Simple Front",
+    )
     parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,bridge,gateway,frontend,manage,simple)")
     parser.add_argument("--skip", type=str, help="跳过指定服务，逗号分隔")
     parser.add_argument("--no-tail", action="store_true", help="不跟踪日志输出")
@@ -1144,6 +1173,12 @@ def main():
         default="",
         help="前端访问的 Gateway 地址（默认自动使用探测到的局域网 IP）",
     )
+    parser.add_argument(
+        "--gateway-port",
+        type=int,
+        default=0,
+        help="Platform Gateway 本地监听端口（默认 8080；--repair-simple 默认 18081）",
+    )
     args = parser.parse_args()
 
     if args.stop:
@@ -1157,6 +1192,16 @@ def main():
         args.only = "db,bridge,gateway,simple"
         args.skip = ""
         args.local_only = True
+        args.api_url = "http://127.0.0.1:18081"
+
+    if args.fast_local:
+        log("Fast Local 本地链路启动：清理残留进程...")
+        stop_all()
+        time.sleep(2)
+        args.only = "db,gateway,simple"
+        args.skip = ""
+        args.local_only = True
+        args.gateway_port = 18081
         args.api_url = "http://127.0.0.1:18081"
 
     # 解析要启动的服务
@@ -1203,7 +1248,7 @@ def main():
 
     processes: dict = {}
     extra_env: dict = {}
-    gateway_port = 18081 if args.repair_simple else 8080
+    gateway_port = args.gateway_port or (18081 if args.repair_simple else 8080)
     if args.repair_simple:
         extra_env.update({
             "OPENCLAW_DISABLE_BONJOUR": "1",

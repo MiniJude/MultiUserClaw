@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     user_openviking_vlm_temperature: float = 0.0
     user_openviking_vlm_timeout: int = 90
     user_openviking_vlm_max_concurrent: int = 2
+    user_openviking_plugin_timeout_ms: int = 2000
+    user_openviking_plugin_auto_recall: bool = False
+    user_openviking_plugin_recall_limit: int = 3
+    user_openviking_plugin_recall_score_threshold: float = 0.18
+    user_openviking_plugin_recall_max_injected_chars: int = 2500
+    user_openviking_plugin_recall_resources: bool = False
+    user_openviking_plugin_capture_max_length: int = 12000
 
     # Idle management
     container_idle_pause_minutes: int = 30

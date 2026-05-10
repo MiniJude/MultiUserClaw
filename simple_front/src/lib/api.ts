@@ -751,10 +751,21 @@ export async function listSessions(options: { force?: boolean } = {}): Promise<S
   if (!options.force && sessionsCache) return sessionsCache
   if (!options.force && sessionsRequest) return sessionsRequest
 
-  sessionsRequest = fetchJSON<Session[]>('/api/openclaw/sessions')
-    .then(result => {
-      sessionsCache = result
-      return result
+  sessionsRequest = Promise.allSettled([
+    fetchJSON<Session[]>('/api/fast-chat/sessions'),
+    fetchJSON<Session[]>('/api/openclaw/sessions'),
+  ])
+    .then(results => {
+      const merged = new Map<string, Session>()
+      results.forEach(result => {
+        if (result.status !== 'fulfilled') return
+        result.value.forEach(session => merged.set(session.key, session))
+      })
+      const sessions = Array.from(merged.values()).sort((a, b) => {
+        return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+      })
+      sessionsCache = sessions
+      return sessions
     })
     .finally(() => {
       sessionsRequest = null
@@ -768,11 +779,25 @@ export function invalidateSessionsCache(): void {
   sessionsRequest = null
 }
 
+function isFastSessionKey(key: string): boolean {
+  return key.includes(':fast-')
+}
+
 export async function getSession(key: string): Promise<SessionDetail> {
+  if (isFastSessionKey(key)) {
+    return fetchJSON<SessionDetail>(`/api/fast-chat/sessions/${encodeURIComponent(key)}`)
+  }
   return fetchJSON<SessionDetail>(`/api/openclaw/sessions/${encodeURIComponent(key)}`)
 }
 
 export async function deleteSession(key: string): Promise<void> {
+  if (isFastSessionKey(key)) {
+    await fetchJSON<unknown>(`/api/fast-chat/sessions/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    })
+    invalidateSessionsCache()
+    return
+  }
   await fetchJSON<unknown>(`/api/openclaw/sessions/${encodeURIComponent(key)}`, {
     method: 'DELETE',
   })
@@ -783,6 +808,17 @@ export async function updateSessionTitle(
   key: string,
   title: string,
 ): Promise<{ ok: boolean; key: string; title: string | null }> {
+  if (isFastSessionKey(key)) {
+    const result = await fetchJSON<{ ok: boolean; key: string; title: string | null }>(
+      `/api/fast-chat/sessions/${encodeURIComponent(key)}/title`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ title }),
+      },
+    )
+    invalidateSessionsCache()
+    return result
+  }
   const result = await fetchJSON<{ ok: boolean; key: string; title: string | null }>(
     `/api/openclaw/sessions/${encodeURIComponent(key)}/title`,
     {
@@ -826,6 +862,46 @@ export async function sendChatMessage(
   )
   invalidateSessionsCache()
   return result
+}
+
+export async function streamFastChatMessage(
+  sessionKey: string,
+  message: string,
+  agentName: string,
+  onDelta: (text: string) => void,
+): Promise<void> {
+  const token = getAccessToken()
+  const res = await fetch(`${API_URL}/api/fast-chat/sessions/${encodeURIComponent(sessionKey)}/messages/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ message, agentName }),
+  })
+  if (!res.ok) throw new Error(await parseErrorMessage(res))
+  if (!res.body) throw new Error('浏览器不支持流式响应')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const line = part.split('\n').find(item => item.startsWith('data:'))
+      if (!line) continue
+      const raw = line.slice(5).trim()
+      if (!raw || raw === '[DONE]') continue
+      const payload = JSON.parse(raw) as { type?: string; text?: string; message?: string }
+      if (payload.type === 'delta' && payload.text) onDelta(payload.text)
+      if (payload.type === 'error') throw new Error(payload.message || '快速回复失败')
+    }
+  }
+  invalidateSessionsCache()
 }
 
 export async function waitForAgentRun(

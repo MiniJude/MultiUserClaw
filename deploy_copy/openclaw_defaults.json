@@ -105,7 +105,8 @@
   },
 
   "tools": {
-    "profile": "full",
+    "profile": "coding",
+    "alsoAllow": ["agents_list"],
     "elevated": {
       "enabled": true,
       "allowFrom": {
@@ -180,8 +181,8 @@
         "waitForBootSync": false
       },
       "limits": {
-        "maxResults": 6,
-        "timeoutMs": 30000
+        "maxResults": 3,
+        "timeoutMs": 2000
       },
       "scope": {
         "default": "deny",

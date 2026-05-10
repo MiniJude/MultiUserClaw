@@ -1,6 +1,7 @@
 """Platform Gateway 统一日志配置。"""
 
 import logging
+import os
 import sys
 
 from app.config import settings
@@ -27,14 +28,16 @@ class ColorFormatter(logging.Formatter):
 
 def setup_logging() -> None:
     """配置全局日志。"""
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
+
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.INFO)
 
     # 清除已有 handler，防止重复输出
     root.handlers.clear()
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(logging.INFO)
     handler.setFormatter(ColorFormatter(
         fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
@@ -45,7 +48,8 @@ def setup_logging() -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+    logging.getLogger("litellm").setLevel(logging.ERROR)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 

@@ -33,7 +33,8 @@ import {
   abortActiveSessionRun,
   getAccessToken,
   uploadFileToWorkspace,
-  generateSessionTitle,
+  updateSessionTitle,
+  streamFastChatMessage,
 } from '../lib/api.ts'
 import type { Session, SessionDetail, AgentInfo } from '../lib/api.ts'
 
@@ -79,7 +80,16 @@ function normalizeSessionKey(key: string): string {
   return key.replace(/:/g, '')
 }
 
-function buildFallbackTitleFromText(fileCount = 0): string {
+function isFastSessionKey(key: string): boolean {
+  return key.includes(':fast-')
+}
+
+function buildFallbackTitleFromText(text = '', fileCount = 0): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized) {
+    const chars = Array.from(normalized)
+    return chars.length > 28 ? `${chars.slice(0, 28).join('')}...` : normalized
+  }
   if (fileCount > 0) return fileCount === 1 ? '处理附件' : `处理 ${fileCount} 个附件`
   return '新对话'
 }
@@ -87,7 +97,7 @@ function buildFallbackTitleFromText(fileCount = 0): string {
 function buildTitleFromMessages(messages: SessionDetail['messages']): string {
   const firstUserMessage = messages.find(msg => msg.role === 'user' && msg.content.trim())
   if (!firstUserMessage) return ''
-  return buildFallbackTitleFromText()
+  return buildFallbackTitleFromText(firstUserMessage.content)
 }
 
 function hasAssistantAfterLastUser(messages: SessionDetail['messages']): boolean {
@@ -669,14 +679,14 @@ export default function Chat() {
     if ((!text && pendingFiles.length === 0) || (!activeSessionKeyRef.current && !isDraftSession) || chatLoading) return
 
     const requestedAgentId = draftAgentId || searchParams.get('agent') || 'main'
-    const sendingSessionKey = activeSessionKeyRef.current || `agent:${requestedAgentId || 'main'}:session-${Date.now()}`
+    const sendingSessionKey = activeSessionKeyRef.current || `agent:${requestedAgentId || 'main'}:fast-${Date.now()}`
     if (sendingBySession[sendingSessionKey]) return
     abortedSessionRef.current[sendingSessionKey] = false
     const isFirstTurn = !activeSessionKeyRef.current
     let firstTurnTitle = ''
     if (isFirstTurn) {
       const now = new Date().toISOString()
-      firstTurnTitle = pendingFiles.length > 0 && !text ? buildFallbackTitleFromText(pendingFiles.length) : '新对话'
+      firstTurnTitle = buildFallbackTitleFromText(text, pendingFiles.length)
       const optimisticSession: Session = {
         key: sendingSessionKey,
         title: firstTurnTitle,
@@ -742,21 +752,25 @@ export default function Chat() {
       setPendingFiles([])
 
       clearStreamingText(sendingSessionKey)
-      const titlePromise = isFirstTurn && text
-        ? generateSessionTitle(sendingSessionKey, text)
-          .then(result => {
-            if (!result.title) return
-            const now = new Date().toISOString()
-            addOptimisticSession({
-              key: sendingSessionKey,
-              title: result.title,
-              created_at: now,
-              updated_at: now,
-            })
-            void refreshSessions({ silent: true, force: true })
-          })
-          .catch(() => {})
-        : Promise.resolve()
+      if (isFastSessionKey(sendingSessionKey)) {
+        let streamedText = ''
+        const agentName = selectedAgent?.identity?.name || selectedAgent?.name || requestedAgentId || '默认助手'
+        await streamFastChatMessage(sendingSessionKey, finalMessage, agentName, delta => {
+          streamedText += delta
+          setStreamingText(sendingSessionKey, streamedText)
+        })
+        const detail = await getSession(sendingSessionKey)
+        applyLoadedMessages(sendingSessionKey, detail.messages || [])
+        clearStreamingText(sendingSessionKey)
+        if (isFirstTurn && firstTurnTitle) {
+          void updateSessionTitle(sendingSessionKey, firstTurnTitle)
+            .then(() => refreshSessions({ silent: true, force: true }))
+            .catch(() => {})
+        }
+        void refreshSessions({ silent: true, force: true })
+        return
+      }
+
       const sendResult = await sendChatMessage(sendingSessionKey, finalMessage)
       setRunIdForSession(sendingSessionKey, sendResult.runId)
       if (abortedSessionRef.current[sendingSessionKey]) {
@@ -767,8 +781,12 @@ export default function Chat() {
         }
         return
       }
-      void titlePromise
       await waitForResponse(sendingSessionKey, sendResult.runId)
+      if (isFirstTurn && firstTurnTitle) {
+        void updateSessionTitle(sendingSessionKey, firstTurnTitle)
+          .then(() => refreshSessions({ silent: true, force: true }))
+          .catch(() => {})
+      }
       void refreshSessions({ silent: true, force: true })
     } catch (err: any) {
       if (!abortedSessionRef.current[sendingSessionKey]) {

@@ -96,6 +96,15 @@ def _build_openviking_plugin_config(user_id: str) -> dict:
         "agent_prefix": f"user-{short_id}",
         "accountId": f"user-{short_id}",
         "userId": user_id,
+        "timeoutMs": settings.user_openviking_plugin_timeout_ms,
+        "autoRecall": settings.user_openviking_plugin_auto_recall,
+        "recallLimit": settings.user_openviking_plugin_recall_limit,
+        "recallScoreThreshold": settings.user_openviking_plugin_recall_score_threshold,
+        "recallMaxInjectedChars": settings.user_openviking_plugin_recall_max_injected_chars,
+        "recallPreferAbstract": True,
+        "recallResources": settings.user_openviking_plugin_recall_resources,
+        "autoCapture": True,
+        "captureMaxLength": settings.user_openviking_plugin_capture_max_length,
     }
     config["apiKey"] = _openviking_api_key_for_user(user_id)
     return {
