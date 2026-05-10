@@ -131,7 +131,7 @@ ENV PATH="/app/node_modules/.bin:$PATH"
 ENV NODE_PATH="/app/node_modules"
 
 RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --offline --frozen-lockfile --reporter=append-only
+    pnpm install --frozen-lockfile --reporter=append-only
 
 # Clean previous build outputs, but do not delete source-tree .js files.
 # This repo intentionally keeps source JS assets/wrappers in src/ and extensions/

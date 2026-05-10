@@ -2,11 +2,11 @@
 """OpenClaw Docker 部署脚本。
 
 构建 openclaw 基础镜像并通过 docker compose 启动所有服务
-（postgres + gateway + frontend + shared-openclaw + share-openclaw-front + manage-front + simple-front）。
+（postgres + gateway + simple-front）。
 支持本地部署和远程服务器部署（通过 SSH）。
 
 用法:
-  # 本地部署（默认端口 gateway:8080, frontend:3080）
+  # 本地部署（默认端口 gateway:8080, simple-front:3085）
   python deploy_docker.py
 
   # 指定服务器 IP（会自动设置 VITE_API_URL）
@@ -25,9 +25,9 @@
   python deploy_docker.py --restart
 
   # 重建指定服务（逗号分隔，openclaw 表示基础镜像）
-  python deploy_docker.py --rebuild openclaw,gateway,frontend,manage-front,simple-front,shared-openclaw,share-openclaw-front
+  python deploy_docker.py --rebuild openclaw,gateway,simple-front
   python deploy_docker.py --rebuild gateway
-  python deploy_docker.py --rebuild frontend
+  python deploy_docker.py --rebuild simple-front
 
   # 使用缓存快速重建（不使用 --no-cache）
   python deploy_docker.py --rebuild gateway --fast
@@ -42,6 +42,7 @@ import concurrent.futures
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -55,6 +56,53 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+def is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def resolve_ports(args) -> dict[str, int]:
+    preferred = {
+        "postgres": args.postgres_port,
+        "bridge": args.bridge_port,
+        "gateway": args.gateway_port,
+        "frontend": args.frontend_port,
+        "manage": args.manage_port,
+        "simple": args.simple_port,
+        "share_front": args.share_front_port,
+    }
+    resolved: dict[str, int] = {}
+    default_reserved = set(preferred.values())
+    used: set[int] = set()
+    for name, port in preferred.items():
+        actual = port
+        if args.auto_port and (actual in used or is_port_in_use(actual)):
+            actual = port + 1
+            while actual in used or actual in default_reserved or is_port_in_use(actual):
+                actual += 1
+        used.add(actual)
+        resolved[name] = actual
+        if actual != port:
+            warn(f"{name} 默认端口 {port} 被占用，自动改用 {actual}")
+    return resolved
+
+
+def export_ports(ports: dict[str, int]):
+    os.environ["POSTGRES_PORT"] = str(ports["postgres"])
+    os.environ["BRIDGE_PORT"] = str(ports["bridge"])
+    os.environ["GATEWAY_PORT"] = str(ports["gateway"])
+    os.environ["FRONTEND_PORT"] = str(ports["frontend"])
+    os.environ["MANAGE_PORT"] = str(ports["manage"])
+    os.environ["SIMPLE_PORT"] = str(ports["simple"])
+    os.environ["SHARE_FRONT_PORT"] = str(ports["share_front"])
 
 
 def resolve_vite_api_url(host: str, gateway_port: int, relative_api: bool) -> str:
@@ -91,6 +139,7 @@ def run(cmd: str | list[str], cwd: str | None = None, check: bool = True, **kwar
     else:
         cmd_display = " ".join(cmd)
     log(f"执行: {cmd_display}")
+    sys.stdout.flush()
     result = subprocess.run(
         cmd if isinstance(cmd, list) else cmd,
         cwd=cwd or PROJECT_DIR,
@@ -252,6 +301,38 @@ def restart_services(compose_file: str):
     success("所有服务已重启")
 
 
+def container_ids_by_name(prefixes: tuple[str, ...], all_containers: bool = False) -> list[str]:
+    container_ids: set[str] = set()
+    for prefix in prefixes:
+        cmd = ["docker", "ps"]
+        if all_containers:
+            cmd.append("-a")
+        cmd.extend(["--filter", f"name={prefix}", "-q"])
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, cwd=PROJECT_DIR,
+        )
+        container_ids.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return sorted(container_ids)
+
+
+def stop_services(compose_file: str):
+    """Stop Docker services without deleting volumes."""
+    compose_args = f"-f {compose_file}"
+    log("停止 Docker Compose 服务...")
+    run(f"docker compose {compose_args} stop", check=False)
+
+    log("停止动态用户容器...")
+    container_ids = container_ids_by_name(("openclaw-user-", "openviking-user-"))
+    if container_ids:
+        run(["docker", "stop", *container_ids], check=False)
+        success("动态用户容器已停止")
+    else:
+        log("没有正在运行的动态用户容器")
+
+    success("Docker 服务已停止，数据卷已保留")
+
+
 def clean_all(compose_file: str):
     """停止所有服务并清理数据。"""
     compose_args = f"-f {compose_file}"
@@ -266,13 +347,9 @@ def clean_all(compose_file: str):
     run(f"docker compose {compose_args} down -v", check=False)
 
     log("清理用户容器...")
-    result = subprocess.run(
-        'docker ps -a --filter "name=openclaw-user-" -q',
-        shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
-    )
-    container_ids = result.stdout.strip()
+    container_ids = container_ids_by_name(("openclaw-user-", "openviking-user-"), all_containers=True)
     if container_ids:
-        run(f"docker rm -f {container_ids}", check=False)
+        run(["docker", "rm", "-f", *container_ids], check=False)
         success("用户容器已清理")
     else:
         log("无用户容器需要清理")
@@ -280,7 +357,7 @@ def clean_all(compose_file: str):
     success("清理完成")
 
 
-def health_check(host: str, gateway_port: int, frontend_port: int, retries: int = 30):
+def health_check(host: str, gateway_port: int, app_port: int, retries: int = 30):
     """等待服务就绪并检查健康状态。"""
     import urllib.request
     import json
@@ -308,43 +385,47 @@ def health_check(host: str, gateway_port: int, frontend_port: int, retries: int 
         error(f"Gateway 未就绪: {gateway_url}")
         return False
 
-    # 等待 frontend
-    frontend_url = f"http://{host}:{frontend_port}"
+    # 等待 Simple Front
+    frontend_url = f"http://{host}:{app_port}"
     for i in range(1, retries + 1):
         try:
             req = urllib.request.Request(frontend_url)
             with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status < 400:
-                    success(f"Frontend 就绪: {frontend_url}")
+                    success(f"Simple Front 就绪: {frontend_url}")
                     break
         except Exception:
             pass
         if i < retries:
-            sys.stdout.write(f"\r  等待 Frontend... ({i}/{retries})")
+            sys.stdout.write(f"\r  等待 Simple Front... ({i}/{retries})")
             sys.stdout.flush()
             time.sleep(2)
     else:
         print()
-        error(f"Frontend 未就绪: {frontend_url}")
+        error(f"Simple Front 未就绪: {frontend_url}")
         return False
 
     return True
 
 
-def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: int, simple_port: int = 3082, share_front_port: int = 3083):
+def show_status(compose_file: str, host: str, ports: dict[str, int]):
     """显示部署状态摘要。"""
     compose_args = f"-f {compose_file}"
     print(f"\n{BOLD}{'=' * 50}{RESET}")
     print(f"{BOLD}  OpenClaw 部署状态{RESET}")
     print(f"{'=' * 50}")
-    print(f"  用户前端:        http://{host}:{frontend_port}")
-    print(f"  简化版前端:      http://{host}:{simple_port}")
-    print(f"  管理员前端:      http://{host}:3081")
-    print(f"  共享前端:        http://{host}:{share_front_port}")
-    print(f"  共享OpenClaw:    http://{host}:18080")
-    print(f"  platform网关:    http://{host}:{gateway_port}")
-    print(f"  使用的compose文件: {compose_file}")
+    print(f"  Simple Front:     http://{host}:{ports['simple']}")
+    print(f"  Platform Gateway: http://{host}:{ports['gateway']}")
+    print(f"  PostgreSQL:        localhost:{ports['postgres']} -> container:5432")
+    print(f"  OpenViking:        {'enabled' if os.environ.get('USER_OPENVIKING_ENABLED') == 'true' else 'disabled'}")
+    print(f"  Compose file:      {compose_file}")
+    print()
+    print("  Optional profiles:")
+    print(f"    legacy front:    docker compose --profile legacy-front {compose_args} up -d frontend")
+    print(f"    admin front:     docker compose --profile admin-front {compose_args} up -d manage-front")
+    print(f"    shared mode:     docker compose --profile shared {compose_args} up -d")
     print(f"{'=' * 50}\n")
+    sys.stdout.flush()
 
     run(f"docker compose {compose_args} ps", check=False)
     print()
@@ -367,12 +448,21 @@ def main():
     )
     parser.add_argument("--build-only", action="store_true", help="仅构建镜像，不启动服务")
     parser.add_argument("--restart", action="store_true", help="仅重启服务")
-    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (openclaw,gateway,frontend)")
+    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (openclaw,gateway,simple-front)")
     parser.add_argument("--clean", action="store_true", help="停止所有服务并清理数据")
     parser.add_argument("--skip-base", action="store_true", help="跳过构建 openclaw 基础镜像")
     parser.add_argument("--skip-health", action="store_true", help="跳过健康检查")
     parser.add_argument("--status", action="store_true", help="仅显示当前状态")
     parser.add_argument("--fast", action="store_true", help="使用 Docker 缓存加快构建速度（不使用 --no-cache）")
+    parser.add_argument("--stop", action="store_true", help="停止 Docker 服务但保留数据卷")
+    parser.add_argument("--manage-port", type=int, default=3081, help="Manage Front port (default: 3081)")
+    parser.add_argument("--simple-port", type=int, default=3085, help="Simple Front port (default: 3085)")
+    parser.add_argument("--share-front-port", type=int, default=3083, help="Share Front port (default: 3083)")
+    parser.add_argument("--bridge-port", type=int, default=18080, help="Shared OpenClaw Bridge port (default: 18080)")
+    parser.add_argument("--postgres-port", type=int, default=15432, help="PostgreSQL host port (default: 15432)")
+    parser.add_argument("--openviking", action="store_true", help="Enable per-user OpenViking sidecars (default: disabled)")
+    parser.add_argument("--no-auto-port", dest="auto_port", action="store_false", help="Do not auto-increment occupied ports")
+    parser.set_defaults(auto_port=True)
     args = parser.parse_args()
 
     # 推断 gateway 端口
@@ -382,13 +472,31 @@ def main():
         else:
             args.gateway_port = 8080
 
+    if args.status or args.stop or args.restart or args.rebuild or args.clean:
+        ports = {
+            "postgres": args.postgres_port,
+            "bridge": args.bridge_port,
+            "gateway": args.gateway_port,
+            "frontend": args.frontend_port,
+            "manage": args.manage_port,
+            "simple": args.simple_port,
+            "share_front": args.share_front_port,
+        }
+    else:
+        ports = resolve_ports(args)
+    export_ports(ports)
+    args.gateway_port = ports["gateway"]
+    args.frontend_port = ports["frontend"]
+    args.simple_port = ports["simple"]
+    os.environ["USER_OPENVIKING_ENABLED"] = "true" if args.openviking else "false"
+
     os.chdir(PROJECT_DIR)
 
     print(f"\n{BOLD}🚀 OpenClaw Docker 部署{RESET}\n")
 
     # 仅显示状态
     if args.status:
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, ports)
         return
 
     check_prerequisites()
@@ -398,10 +506,14 @@ def main():
         clean_all(args.compose)
         return
 
+    if args.stop:
+        stop_services(args.compose)
+        return
+
     # 重启
     if args.restart:
         restart_services(args.compose)
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, ports)
         return
 
     # 重建指定服务（逗号分隔）
@@ -446,7 +558,7 @@ def main():
             run(f"docker compose {compose_args} up -d {services_str}")
             success(f"服务 {services_str} 已重建并启动")
 
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, ports)
         return
 
     check_env_file()
@@ -495,9 +607,9 @@ def main():
     # 健康检查
     if not args.skip_health:
         check_host = "localhost" if args.host in ("0.0.0.0",) else args.host
-        health_check(check_host, args.gateway_port, args.frontend_port)
+        health_check(check_host, args.gateway_port, args.simple_port)
 
-    show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+    show_status(args.compose, args.host, ports)
 
 
 if __name__ == "__main__":

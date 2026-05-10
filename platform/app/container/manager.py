@@ -14,7 +14,7 @@ from pathlib import Path
 
 import docker
 from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -551,6 +551,16 @@ async def upsert_user_port_binding(
     await db.execute(stmt)
 
 
+async def _delete_creating_container_record(db: AsyncSession, user_id: str) -> None:
+    await db.execute(
+        delete(Container).where(
+            Container.user_id == user_id,
+            Container.status == "creating",
+        )
+    )
+    await db.commit()
+
+
 async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     """Create a Docker container for a user and record metadata in DB.
 
@@ -582,8 +592,10 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         # Another request already claimed this user_id — not an error
         return None
 
-    await db.flush()
+    await db.commit()
     record = await get_container(db, user_id)
+    if record is None:
+        raise RuntimeError("Failed to create container placeholder")
 
     # Now safe to create Docker resources — we hold the DB slot.
     _ensure_network()
@@ -607,6 +619,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
             _patch_openviking_plugin_config(user_id, data_vol)
         except Exception:
             await db.rollback()
+            await _delete_creating_container_record(db, user_id)
             raise
 
     # Fetch user's SSO token if available (e.g. InfoX-Med)
@@ -662,11 +675,15 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
                 "5900/tcp": (settings.user_container_bind_ip, preferred_browser_port),
                 "30000/tcp": (settings.user_container_bind_ip, preferred_service_port),
             }
+            if settings.user_container_api_via_host:
+                run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
         else:
             run_kwargs["ports"] = {
                 "5900/tcp": (settings.user_container_bind_ip, None),
                 "30000/tcp": (settings.user_container_bind_ip, None),
             }
+            if settings.user_container_api_via_host:
+                run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
 
     try:
         docker_container = client.containers.run(**run_kwargs)
@@ -677,17 +694,22 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
                 "5900/tcp": (settings.user_container_bind_ip, None),
                 "30000/tcp": (settings.user_container_bind_ip, None),
             }
+            if settings.user_container_api_via_host:
+                run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
             docker_container = client.containers.run(**run_kwargs)
         else:
             await db.rollback()
+            await _delete_creating_container_record(db, user_id)
             raise
     except Exception:
         # Docker creation failed — remove the placeholder DB record
         await db.rollback()
+        await _delete_creating_container_record(db, user_id)
         raise
 
     # Read container IP on the internal network
     docker_container.reload()
+    api_binding = _published_binding(docker_container, "18080/tcp")
     browser_binding = _published_binding(docker_container, "5900/tcp")
     service_binding = _published_binding(docker_container, "30000/tcp")
     expose_markdown = _build_expose_port_skill_markdown(
@@ -708,7 +730,12 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
 
     record.docker_id = docker_container.id
     record.status = "running"
-    record.internal_host = internal_ip
+    if settings.user_container_api_via_host and api_binding[1]:
+        record.internal_host = "127.0.0.1"
+        record.internal_port = int(api_binding[1])
+    else:
+        record.internal_host = internal_ip
+        record.internal_port = 18080
     await upsert_user_port_binding(
         db=db,
         user_id=user_id,
@@ -807,18 +834,34 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
                         c.restart(timeout=10)
                         c.reload()
             # Sync internal IP — it may change after container restart
-            nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
-            for net_info in nets.values():
-                current_ip = net_info.get("IPAddress", "")
-                if current_ip and current_ip != record.internal_host:
-                    record.internal_host = current_ip
+            if settings.user_container_api_via_host:
+                api_binding = _published_binding(c, "18080/tcp")
+                if not api_binding[1]:
+                    return await _recreate_container_record(db, record, c)
+                api_port = int(api_binding[1])
+                if record.internal_host != "127.0.0.1" or record.internal_port != api_port:
+                    record.internal_host = "127.0.0.1"
+                    record.internal_port = api_port
                     await db.execute(
                         update(Container)
                         .where(Container.id == record.id)
-                        .values(internal_host=current_ip)
+                        .values(internal_host="127.0.0.1", internal_port=api_port)
                     )
                     await db.commit()
-                break
+            else:
+                nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+                for net_info in nets.values():
+                    current_ip = net_info.get("IPAddress", "")
+                    if current_ip and current_ip != record.internal_host:
+                        record.internal_host = current_ip
+                        record.internal_port = 18080
+                        await db.execute(
+                            update(Container)
+                            .where(Container.id == record.id)
+                            .values(internal_host=current_ip, internal_port=18080)
+                        )
+                        await db.commit()
+                    break
         except DockerNotFound:
             return await _recreate_container_record(db, record)
 

@@ -30,6 +30,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -53,6 +54,7 @@ DIM   = "\033[2m"
 RESET = "\033[0m"
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+IDENTITY_TITLE_PREFIX_RE = re.compile(r"^\s*ident(?:ity|ify)\.md\s*[-:：\u2013\u2014]\s*", re.IGNORECASE)
 
 if IS_WINDOWS:
     try:
@@ -121,6 +123,68 @@ def is_port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def docker_container_host_port(name: str, container_port: int) -> int | None:
+    """Return a running container's published host port."""
+    try:
+        result = subprocess.run(
+            ["docker", "port", name, f"{container_port}/tcp"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    try:
+        return int(line.rsplit(":", 1)[-1])
+    except ValueError:
+        return None
+
+
+def resolve_service_ports(enabled: list[str], gateway_port: int) -> dict[str, int]:
+    """Resolve startup ports once, then pass the final values to all services."""
+    preferred_ports = {
+        svc_id: gateway_port if svc_id == "gateway" else SERVICES[svc_id]["port"]
+        for svc_id in ("db", "bridge", "gateway", "frontend", "manage", "simple")
+        if svc_id in enabled
+    }
+    existing_ports: dict[str, int] = {}
+    if "db" in enabled:
+        running_db_port = docker_container_host_port("openclaw-local-postgres", 5432)
+        if running_db_port:
+            existing_ports["db"] = running_db_port
+    default_reserved = set(preferred_ports.values())
+    used: set[int] = set()
+    ports: dict[str, int] = {}
+
+    for svc_id, preferred in preferred_ports.items():
+        actual = existing_ports.get(svc_id, preferred)
+        if svc_id not in existing_ports and (actual in used or is_port_in_use(actual)):
+            actual = preferred + 1
+            while actual in used or actual in default_reserved or is_port_in_use(actual):
+                actual += 1
+        used.add(actual)
+        ports[svc_id] = actual
+        if actual != preferred:
+            warn(f"{SERVICES[svc_id]['name']} 默认端口 {preferred} 被占用，自动改用 {actual}")
+
+    if "bridge" in enabled:
+        preferred_gateway = 18789
+        actual_gateway = preferred_gateway
+        if actual_gateway in used or is_port_in_use(actual_gateway):
+            actual_gateway = preferred_gateway + 1
+            while actual_gateway in used or is_port_in_use(actual_gateway):
+                actual_gateway += 1
+        used.add(actual_gateway)
+        ports["openclaw_gateway"] = actual_gateway
+        if actual_gateway != preferred_gateway:
+            warn(f"OpenClaw Gateway 默认端口 {preferred_gateway} 被占用，自动改用 {actual_gateway}")
+
+    return ports
+
+
 def wait_for_port(port: int, timeout: int = 30, name: str = "") -> bool:
     """等待端口可用。"""
     for i in range(timeout):
@@ -142,32 +206,36 @@ def http_get_ok(url: str, timeout: int = 5) -> bool:
         return False
 
 
-def validate_local_chain(enabled: list[str], gateway_port: int = 8080) -> bool:
+def validate_local_chain(enabled: list[str], ports: dict[str, int]) -> bool:
     """Validate that the local dev services are not left in a half-started state."""
     checks: list[tuple[str, object, str]] = []
 
     if "gateway" in enabled:
+        gateway_port = ports.get("gateway", SERVICES["gateway"]["port"])
         checks.append((
             "Platform Gateway /api/ping",
             lambda: http_get_ok(f"http://localhost:{gateway_port}/api/ping", timeout=5),
             f"http://localhost:{gateway_port}/api/ping",
         ))
     if "bridge" in enabled:
+        bridge_port = ports.get("bridge", SERVICES["bridge"]["port"])
+        openclaw_gateway_port = ports.get("openclaw_gateway", 18789)
         checks.append((
             "OpenClaw Bridge API",
-            lambda: http_get_ok("http://127.0.0.1:18080/api/cron/jobs", timeout=8),
-            "http://127.0.0.1:18080/api/cron/jobs",
+            lambda: http_get_ok(f"http://127.0.0.1:{bridge_port}/api/cron/jobs", timeout=8),
+            f"http://127.0.0.1:{bridge_port}/api/cron/jobs",
         ))
         checks.append((
             "OpenClaw Gateway WS port",
-            lambda: is_port_in_use(18789),
-            "127.0.0.1:18789",
+            lambda: is_port_in_use(openclaw_gateway_port),
+            f"127.0.0.1:{openclaw_gateway_port}",
         ))
     if "simple" in enabled:
+        simple_port = ports.get("simple", SERVICES["simple"]["port"])
         checks.append((
             "Simple Front",
-            lambda: is_port_in_use(3085),
-            "http://127.0.0.1:3085",
+            lambda: is_port_in_use(simple_port),
+            f"http://127.0.0.1:{simple_port}",
         ))
 
     failed: list[tuple[str, str]] = []
@@ -236,9 +304,9 @@ def _detect_lan_ip() -> str:
 
 # ── PostgreSQL ────────────────────────────────────────────────────────
 
-def start_postgres() -> bool:
+def start_postgres(port: int = 5432) -> bool:
     """启动 PostgreSQL Docker 容器。"""
-    log("启动 PostgreSQL...")
+    log(f"启动 PostgreSQL (端口 {port})...")
 
     # 检查是否已有容器在运行
     result = subprocess.run(
@@ -246,7 +314,7 @@ def start_postgres() -> bool:
         capture_output=True, text=True,
     )
     if result.stdout.strip():
-        success("PostgreSQL 已在运行")
+        success(f"PostgreSQL 已在运行 (端口 {port})")
         return True
 
     # 检查是否有已停止的容器
@@ -255,22 +323,23 @@ def start_postgres() -> bool:
         capture_output=True, text=True,
     )
     if result.stdout.strip():
-        log("启动已有的 PostgreSQL 容器...")
-        subprocess.run(["docker", "start", "openclaw-local-postgres"], check=True)
+        log("重建 PostgreSQL 容器端口映射（保留数据卷）...")
+        subprocess.run(["docker", "rm", "openclaw-local-postgres"], check=True)
     else:
         log("创建新的 PostgreSQL 容器...")
-        subprocess.run([
-            "docker", "run", "-d",
-            "--name", "openclaw-local-postgres",
-            "-e", "POSTGRES_USER=nanobot",
-            "-e", "POSTGRES_PASSWORD=nanobot",
-            "-e", "POSTGRES_DB=nanobot_platform",
-            "-v", "openclaw-local-pgdata:/var/lib/postgresql/data",
-            "-p", "5432:5432",
-            "postgres:16-alpine",
-        ], check=True)
 
-    if wait_for_port(5432, timeout=15, name="PostgreSQL"):
+    subprocess.run([
+        "docker", "run", "-d",
+        "--name", "openclaw-local-postgres",
+        "-e", "POSTGRES_USER=nanobot",
+        "-e", "POSTGRES_PASSWORD=nanobot",
+        "-e", "POSTGRES_DB=nanobot_platform",
+        "-v", "openclaw-local-pgdata:/var/lib/postgresql/data",
+        "-p", f"{port}:5432",
+        "postgres:16-alpine",
+    ], check=True)
+
+    if wait_for_port(port, timeout=15, name="PostgreSQL"):
         # 端口已就绪，再验证数据库连接
         for attempt in range(1, 11):
             try:
@@ -279,7 +348,7 @@ def start_postgres() -> bool:
                     capture_output=True, text=True, timeout=5
                 )
                 if result.returncode == 0:
-                    success("PostgreSQL 就绪 (端口 5432)")
+                    success(f"PostgreSQL 就绪 (端口 {port})")
                     return True
             except subprocess.TimeoutExpired:
                 pass
@@ -304,11 +373,11 @@ def stop_postgres():
 
 # ── OpenClaw Bridge ───────────────────────────────────────────────────
 
-def start_bridge(env: dict, enable_channels: bool = True) -> "subprocess.Popen | None":
-    log("启动 OpenClaw Bridge 后端 (端口 18080)...")
+def start_bridge(env: dict, enable_channels: bool = True, bridge_port: int = 18080, openclaw_gateway_port: int = 18789) -> "subprocess.Popen | None":
+    log(f"启动 OpenClaw Bridge 后端 (端口 {bridge_port})...")
 
-    if is_port_in_use(18080):
-        warn("端口 18080 已被占用，跳过 bridge")
+    if is_port_in_use(bridge_port):
+        warn(f"端口 {bridge_port} 已被占用，跳过 bridge")
         return None
 
     bridge_dir = os.path.join(PROJECT_DIR, "openclaw")
@@ -324,7 +393,11 @@ def start_bridge(env: dict, enable_channels: bool = True) -> "subprocess.Popen |
         else:
             cmd = ["node", "bridge/dist/bridge/start.js"]
 
-    bridge_env = _base_env(**env)
+    bridge_env = _base_env(
+        BRIDGE_PORT=str(bridge_port),
+        OPENCLAW_GATEWAY_PORT=str(openclaw_gateway_port),
+        **env,
+    )
     if enable_channels:
         # 本地开发默认启用渠道（飞书、Telegram 等），不跳过。
         bridge_env["BRIDGE_ENABLE_CHANNELS"] = "1"
@@ -384,8 +457,8 @@ def start_bridge(env: dict, enable_channels: bool = True) -> "subprocess.Popen |
             _suggest_bridge_fix(output_lines)
             return None
 
-        if is_port_in_use(18080):
-            success("OpenClaw Bridge 就绪 (端口 18080)")
+        if is_port_in_use(bridge_port):
+            success(f"OpenClaw Bridge 就绪 (端口 {bridge_port})")
             if bridge_log:
                 bridge_log.close()
             return proc
@@ -484,7 +557,7 @@ def _suggest_bridge_fix(output_lines: list):
 
 # ── Platform Gateway ──────────────────────────────────────────────────
 
-def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
+def start_gateway(env: dict, port: int = 8080, db_port: int = 5432, bridge_port: int = 18080, openclaw_gateway_port: int = 18789, use_dev_bridge: bool = False) -> "subprocess.Popen | None":
     log(f"启动 Platform Gateway (端口 {port})...")
 
     if is_port_in_use(port):
@@ -494,15 +567,20 @@ def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
             warn(f"端口 {port} 已被占用，但 /api/ping 未响应")
         return None
 
-    proc_env = _base_env(
-        PLATFORM_DATABASE_URL="postgresql+asyncpg://nanobot:nanobot@localhost:5432/nanobot_platform",
-        PLATFORM_PORT=str(port),
+    gateway_env = {
+        "PLATFORM_DATABASE_URL": f"postgresql+asyncpg://nanobot:nanobot@localhost:{db_port}/nanobot_platform",
+        "PLATFORM_PORT": str(port),
         # 本地开发模式：直接代理到本机 openclaw web，跳过 Docker 容器管理
-        PLATFORM_DEV_OPENCLAW_URL="http://127.0.0.1:18080",
         # WebSocket 直连 OpenClaw Gateway（跳过 Bridge 的聊天中转）
-        PLATFORM_DEV_GATEWAY_URL="ws://127.0.0.1:18789",
-        **env,
-    )
+        "PLATFORM_SHARED_OPENCLAW_ENABLED": "false",
+        "PLATFORM_USER_OPENVIKING_ENABLED": "false",
+        "PLATFORM_USER_CONTAINER_API_VIA_HOST": "true",
+    }
+    gateway_env.update(env)
+    proc_env = _base_env(**gateway_env)
+    if use_dev_bridge:
+        proc_env.setdefault("PLATFORM_DEV_OPENCLAW_URL", f"http://127.0.0.1:{bridge_port}")
+        proc_env.setdefault("PLATFORM_DEV_GATEWAY_URL", f"ws://127.0.0.1:{openclaw_gateway_port}")
 
     # 从项目根目录 .env 读取配置并注入 PLATFORM_ 前缀
     # 需要转发的变量：所有 *_API_KEY、*_API_BASE、JWT_SECRET、DEFAULT_MODEL
@@ -516,6 +594,12 @@ def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
                     key, _, val = line.partition("=")
                     key, val = key.strip(), val.strip().strip("'\"")
                     if key.endswith(("_API_KEY", "_API_BASE")) or key in _EXTRA_ENV_KEYS:
+                        platform_key = f"PLATFORM_{key}"
+                        proc_env.setdefault(platform_key, val)
+                    elif (
+                        key.startswith("USER_OPENVIKING_")
+                        and proc_env.get("PLATFORM_USER_OPENVIKING_ENABLED", "").lower() == "true"
+                    ):
                         platform_key = f"PLATFORM_{key}"
                         proc_env.setdefault(platform_key, val)
 
@@ -556,11 +640,11 @@ def start_gateway(env: dict, port: int = 8080) -> "subprocess.Popen | None":
 
 # ── Frontend Dev Server ───────────────────────────────────────────────
 
-def start_frontend(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | None":
-    log("启动 Frontend Dev Server (端口 3080)...")
+def start_frontend(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.1:8080", port: int = 3080) -> "subprocess.Popen | None":
+    log(f"启动 Frontend Dev Server (端口 {port})...")
 
-    if is_port_in_use(3080):
-        warn("端口 3080 已被占用，跳过 frontend")
+    if is_port_in_use(port):
+        warn(f"端口 {port} 已被占用，跳过 frontend")
         return None
 
     frontend_dir = os.path.join(PROJECT_DIR, "frontend")
@@ -571,7 +655,7 @@ def start_frontend(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.
         subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True)
 
     # 让 vite 明确绑定到指定网卡，支持其他设备访问
-    dev_cmd = f"npm run dev -- --host {frontend_host} --port 3080"
+    dev_cmd = f"npm run dev -- --host {frontend_host} --port {port}"
     proc = subprocess.Popen(
         dev_cmd,
         cwd=frontend_dir,
@@ -587,11 +671,11 @@ def start_frontend(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.
 
 # ── Manage Admin Dev Server ──────────────────────────────────────────
 
-def start_manage(api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | None":
-    log("启动 Manage Admin Dev Server (端口 3081)...")
+def start_manage(api_url: str = "http://127.0.0.1:8080", port: int = 3081) -> "subprocess.Popen | None":
+    log(f"启动 Manage Admin Dev Server (端口 {port})...")
 
-    if is_port_in_use(3081):
-        warn("端口 3081 已被占用，跳过 manage")
+    if is_port_in_use(port):
+        warn(f"端口 {port} 已被占用，跳过 manage")
         return None
 
     manage_dir = os.path.join(PROJECT_DIR, "manage_front")
@@ -603,11 +687,11 @@ def start_manage(api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | 
         log("安装管理端依赖...")
         subprocess.run("npm install", cwd=manage_dir, shell=True, check=True)
 
-    dev_cmd = "npm run dev -- -p 3081"
+    dev_cmd = f"npm run dev -- -p {port}"
     proc = subprocess.Popen(
         dev_cmd,
         cwd=manage_dir,
-        env=_base_env(NEXT_PUBLIC_API_URL=api_url),
+        env=_base_env(API_URL=api_url, NEXT_PUBLIC_API_URL=api_url),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         shell=True,
@@ -619,11 +703,11 @@ def start_manage(api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | 
 
 # ── Simple Front Dev Server ───────────────────────────────────────────
 
-def start_simple(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | None":
-    log("启动 Simple Front Dev Server (端口 3085)...")
+def start_simple(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.1:8080", port: int = 3085) -> "subprocess.Popen | None":
+    log(f"启动 Simple Front Dev Server (端口 {port})...")
 
-    if is_port_in_use(3085):
-        warn("端口 3085 已被占用，跳过 simple")
+    if is_port_in_use(port):
+        warn(f"端口 {port} 已被占用，跳过 simple")
         return None
 
     simple_dir = os.path.join(PROJECT_DIR, "simple_front")
@@ -632,7 +716,7 @@ def start_simple(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.
         log("安装 simple-front 依赖...")
         subprocess.run("npm install", cwd=simple_dir, shell=True, check=True)
 
-    dev_cmd = f"npm run dev -- --host {frontend_host} --port 3085"
+    dev_cmd = f"npm run dev -- --host {frontend_host} --port {port}"
     proc = subprocess.Popen(
         dev_cmd,
         cwd=simple_dir,
@@ -643,7 +727,7 @@ def start_simple(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.
         **({"start_new_session": True} if not IS_WINDOWS else {}),
     )
     log(f"  PID: {proc.pid}")
-    if not wait_for_port(3085, timeout=30, name="Simple Front"):
+    if not wait_for_port(port, timeout=30, name="Simple Front"):
         error("Simple Front 启动超时")
         proc.terminate()
         return None
@@ -691,6 +775,7 @@ def tail_output(procs: dict):
 def stop_all():
     log("停止所有本地服务...")
     stop_postgres()
+    stop_user_runtime_containers()
 
     if IS_WINDOWS:
         _stop_all_windows()
@@ -698,6 +783,25 @@ def stop_all():
         _stop_all_unix()
 
     success("所有服务已停止")
+
+
+def stop_user_runtime_containers():
+    """Stop per-user OpenClaw/OpenViking containers started by the platform."""
+    container_ids: list[str] = []
+    for name_prefix in ("openclaw-user-", "openviking-user-"):
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", f"name={name_prefix}", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue
+        container_ids.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
+    container_ids = sorted(set(container_ids))
+    if container_ids:
+        subprocess.run(["docker", "stop", *container_ids], capture_output=True, text=True, timeout=30)
 
 
 def _stop_all_unix():
@@ -997,10 +1101,15 @@ def _read_agent_display_name(src_agent_dir: str, fallback: str) -> str:
                 if stripped.startswith("# "):
                     name = stripped[2:].strip()
                     if name:
-                        return name
+                        return _clean_agent_display_name(name) or fallback
     except OSError:
         pass
     return fallback
+
+
+def _clean_agent_display_name(name: str) -> str:
+    """Remove internal identity file labels from user-facing agent names."""
+    return IDENTITY_TITLE_PREFIX_RE.sub("", name).strip()
 
 
 def _register_agents_in_config(config_path: str, agents: list):
@@ -1019,13 +1128,24 @@ def _register_agents_in_config(config_path: str, agents: list):
     if "list" not in config["agents"]:
         config["agents"]["list"] = []
 
-    existing_ids = {
-        entry.get("id", "").lower()
+    existing_entries = {
+        entry.get("id", "").lower(): entry
         for entry in config["agents"]["list"]
         if isinstance(entry, dict)
     }
+    existing_ids = set(existing_entries.keys())
 
     changed = False
+    for agent_id, entry in existing_entries.items():
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        cleaned_name = _clean_agent_display_name(name)
+        if cleaned_name and cleaned_name != name:
+            entry["name"] = cleaned_name
+            log(f"  修正 Agent 展示名: {name} -> {cleaned_name}")
+            changed = True
+
     for agent in agents:
         if agent["id"] not in existing_ids:
             entry = {
@@ -1148,6 +1268,11 @@ def main():
         action="store_true",
         help="一键启动低延迟本地链路：Docker PostgreSQL + 本地 Platform Gateway + 本地 Simple Front",
     )
+    parser.add_argument(
+        "--openviking",
+        action="store_true",
+        help="启用每用户独立 OpenViking 记忆 sidecar（默认关闭，不启用 Share）",
+    )
     parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,bridge,gateway,frontend,manage,simple)")
     parser.add_argument("--skip", type=str, help="跳过指定服务，逗号分隔")
     parser.add_argument("--no-tail", action="store_true", help="不跟踪日志输出")
@@ -1189,7 +1314,7 @@ def main():
         log("Simple Front 本地链路修复：清理残留进程...")
         stop_all()
         time.sleep(2)
-        args.only = "db,bridge,gateway,simple"
+        args.only = "db,gateway,simple"
         args.skip = ""
         args.local_only = True
         args.api_url = "http://127.0.0.1:18081"
@@ -1205,11 +1330,17 @@ def main():
         args.api_url = "http://127.0.0.1:18081"
 
     # 解析要启动的服务
-    all_services = ["db", "bridge", "gateway", "frontend", "manage", "simple"]
+    all_services = ["db", "gateway", "simple"]
     enabled = [s.strip() for s in args.only.split(",")] if args.only else list(all_services)
     if args.skip:
         skip = {s.strip() for s in args.skip.split(",")}
         enabled = [s for s in enabled if s not in skip]
+
+    gateway_default_port = args.gateway_port or (18081 if args.repair_simple else SERVICES["gateway"]["port"])
+    ports = resolve_service_ports(enabled, gateway_default_port)
+    gateway_port = ports.get("gateway", gateway_default_port)
+    if args.repair_simple or args.fast_local:
+        args.api_url = f"http://127.0.0.1:{gateway_port}"
 
     platform_label = "Windows" if IS_WINDOWS else ("macOS" if sys.platform == "darwin" else "Linux")
     print(f"\n{BOLD}🔧 OpenClaw 本地开发环境 ({platform_label}){RESET}\n")
@@ -1233,9 +1364,9 @@ def main():
     if args.api_url:
         frontend_api_url = args.api_url.rstrip("/")
     elif args.local_only:
-        frontend_api_url = "http://127.0.0.1:8080"
+        frontend_api_url = f"http://127.0.0.1:{gateway_port}"
     else:
-        frontend_api_url = f"http://{lan_ip}:8080"
+        frontend_api_url = f"http://{lan_ip}:{gateway_port}"
 
     # 启动前打印网络模式与 IP 探测结果，便于排障
     log(f"探测到局域网 IP: {lan_ip}")
@@ -1248,7 +1379,8 @@ def main():
 
     processes: dict = {}
     extra_env: dict = {}
-    gateway_port = args.gateway_port or (18081 if args.repair_simple else 8080)
+    if args.openviking:
+        extra_env["PLATFORM_USER_OPENVIKING_ENABLED"] = "true"
     if args.repair_simple:
         extra_env.update({
             "OPENCLAW_DISABLE_BONJOUR": "1",
@@ -1282,12 +1414,17 @@ def main():
                 error("Docker 未运行，无法启动 PostgreSQL")
                 error("请先启动 Docker，或使用 --skip db 跳过")
                 sys.exit(1)
-            if not start_postgres():
+            if not start_postgres(port=ports.get("db", SERVICES["db"]["port"])):
                 sys.exit(1)
 
         # 2. OpenClaw Bridge 后端（含就绪等待，gateway 代理依赖它）
         if "bridge" in enabled:
-            proc = start_bridge(extra_env, enable_channels=not args.repair_simple)
+            proc = start_bridge(
+                extra_env,
+                enable_channels=not args.repair_simple,
+                bridge_port=ports.get("bridge", SERVICES["bridge"]["port"]),
+                openclaw_gateway_port=ports.get("openclaw_gateway", 18789),
+            )
             if proc:
                 processes["bridge"] = proc
             elif args.repair_simple:
@@ -1295,7 +1432,14 @@ def main():
 
         # 3. Platform Gateway
         if "gateway" in enabled:
-            proc = start_gateway(extra_env, port=gateway_port)
+            proc = start_gateway(
+                extra_env,
+                port=gateway_port,
+                db_port=ports.get("db", SERVICES["db"]["port"]),
+                bridge_port=ports.get("bridge", SERVICES["bridge"]["port"]),
+                openclaw_gateway_port=ports.get("openclaw_gateway", 18789),
+                use_dev_bridge=("bridge" in enabled),
+            )
             if proc:
                 processes["gateway"] = proc
 
@@ -1305,25 +1449,25 @@ def main():
 
         # 4. Frontend
         if "frontend" in enabled:
-            proc = start_frontend(frontend_host=frontend_host, api_url=frontend_api_url)
+            proc = start_frontend(frontend_host=frontend_host, api_url=frontend_api_url, port=ports.get("frontend", SERVICES["frontend"]["port"]))
             if proc:
                 processes["frontend"] = proc
 
         # 5. Manage Admin
         if "manage" in enabled:
-            proc = start_manage(api_url=frontend_api_url)
+            proc = start_manage(api_url=frontend_api_url, port=ports.get("manage", SERVICES["manage"]["port"]))
             if proc:
                 processes["manage"] = proc
 
         # 6. Simple Front
         if "simple" in enabled:
-            proc = start_simple(frontend_host=frontend_host, api_url=frontend_api_url)
+            proc = start_simple(frontend_host=frontend_host, api_url=frontend_api_url, port=ports.get("simple", SERVICES["simple"]["port"]))
             if proc:
                 processes["simple"] = proc
 
         # 启动后做完整链路校验，避免留下只启动了部分服务的半断链状态。
         if any(svc in enabled for svc in ("bridge", "gateway", "simple")):
-            if not validate_local_chain(enabled, gateway_port=gateway_port):
+            if not validate_local_chain(enabled, ports):
                 sys.exit(1)
 
         if not processes:
@@ -1339,21 +1483,21 @@ def main():
             svc = SERVICES[svc_id]
             if svc_id == "db":
                 pid_info = "Docker 容器"
-                url_port = svc["port"]
+                url_port = ports.get(svc_id, svc["port"])
             elif svc_id == "gateway":
                 pid_info = f"PID {processes[svc_id].pid}" if svc_id in processes and processes[svc_id] else "已有实例"
                 url_port = gateway_port
             elif svc_id in processes and processes[svc_id]:
                 pid_info = f"PID {processes[svc_id].pid}"
-                url_port = svc["port"]
+                url_port = ports.get(svc_id, svc["port"])
             else:
                 pid_info = "已有实例"
-                url_port = svc["port"]
+                url_port = ports.get(svc_id, svc["port"])
             print(f"  {svc['color']}{svc['name']:>20}{RESET}  http://{display_host}:{url_port}  ({pid_info})")
         if "frontend" in enabled:
             print(f"  {DIM}Frontend 绑定: {frontend_host} | VITE_API_URL={frontend_api_url}{RESET}")
         if not args.local_only and lan_ip != "127.0.0.1":
-            print(f"  {DIM}局域网访问: http://{lan_ip}:3080{RESET}")
+            print(f"  {DIM}局域网访问: http://{lan_ip}:{ports.get('frontend', SERVICES['frontend']['port'])}{RESET}")
         print(f"{'=' * 52}")
         print(f"  {DIM}按 Ctrl+C 停止所有服务{RESET}\n")
 

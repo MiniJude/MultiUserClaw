@@ -1,7 +1,7 @@
 # OpenClaw Multi-Tenant Deployment
 #
 # Architecture:
-#   frontend (public:3000) → gateway (internal+external) → per-user containers (internal only)
+#   simple-front (public:3000) -> gateway (internal+external) -> per-user containers (internal only)
 #                                  ↕
 #                            postgres (internal)
 #
@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: nanobot
       POSTGRES_DB: nanobot_platform
     ports:
-      - "15432:5432"
+      - "${POSTGRES_PORT:-15432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -66,7 +66,7 @@ services:
       PLATFORM_OPENCLAW_IMAGE: openclaw:latest
       PLATFORM_DEPLOY_VERSION: ${DEPLOY_VERSION:-}
       PLATFORM_CONTAINER_NETWORK: openclaw-internal
-      PLATFORM_SHARED_OPENCLAW_ENABLED: ${PLATFORM_SHARED_OPENCLAW_ENABLED:-true}
+      PLATFORM_SHARED_OPENCLAW_ENABLED: ${PLATFORM_SHARED_OPENCLAW_ENABLED:-false}
       PLATFORM_SHARED_OPENCLAW_URL: ${PLATFORM_SHARED_OPENCLAW_URL:-http://shared-openclaw:18080}
       PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN: ${PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN:-shared-openclaw-system-token}
       PLATFORM_CONTAINER_TZ: ${CONTAINER_TZ:-Asia/Shanghai}
@@ -116,22 +116,26 @@ services:
         condition: service_healthy
 
   frontend:
+    profiles: ["legacy-front"]
     container_name: openclaw-frontend
     build:
       context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-}
     ports:
-      - "3080:3000"
+      - "${FRONTEND_PORT:-3080}:3000"
     networks:
       - openclaw-external
     depends_on:
       - gateway
 
   shared-openclaw:
+    profiles: ["shared"]
     container_name: openclaw-shared
     image: openclaw:latest
     command: ["node", "bridge/dist/bridge/start.js"]
+    ports:
+      - "${BRIDGE_PORT:-18080}:18080"
     environment:
       NANOBOT_PROXY__URL: http://gateway:8080/llm/v1
       NANOBOT_PROXY__TOKEN: ${PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN:-shared-openclaw-system-token}
@@ -149,10 +153,11 @@ services:
       - gateway
 
   manage-front:
+    profiles: ["admin-front"]
     container_name: openclaw-manage
     build: ./manage_front
     ports:
-      - "3081:3000"
+      - "${MANAGE_PORT:-3081}:3000"
     environment:
       - API_URL=http://gateway:8080
     networks:
@@ -167,20 +172,21 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-}
     ports:
-      - "3082:3000"
+      - "${SIMPLE_PORT:-3085}:3000"
     networks:
       - openclaw-external
     depends_on:
       - gateway
 
   share-openclaw-front:
+    profiles: ["shared"]
     container_name: openclaw-share-front
     build:
       context: ./share_openclaw_front
       args:
         VITE_API_URL: ${VITE_API_URL:-}
     ports:
-      - "3083:3000"
+      - "${SHARE_FRONT_PORT:-3083}:3000"
     networks:
       - openclaw-external
     depends_on:

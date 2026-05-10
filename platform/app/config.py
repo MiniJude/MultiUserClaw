@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     shared_openclaw_timeout_seconds: int = 120
     shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True
+    user_container_api_via_host: bool = False
     user_container_bind_ip: str = "0.0.0.0"
     container_tz: str = "Asia/Shanghai"
     # 🟢 提升资源限制（适合浏览器/agent）
