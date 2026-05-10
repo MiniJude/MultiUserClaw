@@ -892,6 +892,29 @@ describe("gateway session utils", () => {
     });
   });
 
+  test("listAgentsForGateway strips identity file labels from display names", () => {
+    const cfg = {
+      session: { mainKey: "main" },
+      agents: {
+        list: [
+          {
+            id: "main",
+            default: true,
+            name: "IDENTITY.md - 主助手",
+            identity: { name: "identify.md: 助手" },
+          },
+        ],
+      },
+    } as OpenClawConfig;
+
+    const result = listAgentsForGateway(cfg);
+    expect(result.agents[0]).toMatchObject({
+      id: "main",
+      name: "主助手",
+      identity: { name: "助手" },
+    });
+  });
+
   test("listAgentsForGateway reports effective env runtime fallback override", () => {
     const previousFallback = process.env.OPENCLAW_AGENT_HARNESS_FALLBACK;
     process.env.OPENCLAW_AGENT_HARNESS_FALLBACK = "pi";

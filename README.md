@@ -527,6 +527,9 @@ python deploy_docker.py --build-only
 # 仅重启服务
 python deploy_docker.py --restart
 
+# 停止服务（保留数据卷）
+python deploy_docker.py --stop
+
 # 完全清理重建
 python deploy_docker.py --clean
 ```
@@ -661,10 +664,15 @@ docker compose logs -f
 | 服务 | 端口 | 说明 |
 |------|------|------|
 | Frontend | 3080 (映射 3000) | Web 界面 |
+| Manage Front | 3081 (映射 3000) | 管理后台 |
+| Share Front | 3083 (映射 3000) | 共享前端 |
+| Simple Front | 3085 (映射 3000) | 简化版前端 |
 | Gateway | 8080 | API 网关（浏览器直接请求） |
 | PostgreSQL | 15432 (映射 5432) | 内部数据库 |
 | OpenClaw Bridge (容器内) | 18080 | 容器对外 HTTP + WS |
 | OpenClaw Gateway (容器内) | 18789 | 容器内部 Agent 引擎 (loopback) |
+
+`start_local.py` 和 `deploy_docker.py` 默认使用同一套端口。若端口已被占用，脚本会自动向后查找可用端口（例如 3085 -> 3086），并在启动完成后打印所有实际访问地址。
 
 ### 数据持久化
 

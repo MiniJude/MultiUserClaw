@@ -723,6 +723,13 @@ function normalizeFallbackList(values: readonly string[]): string[] {
   return out;
 }
 
+function cleanAgentDisplayName(name: string | undefined): string | undefined {
+  const cleaned = name
+    ?.replace(/^\s*ident(?:ity|ify)\.md\s*[-:：\u2013\u2014]\s*/i, "")
+    .trim();
+  return cleaned || undefined;
+}
+
 function resolveGatewayAgentModel(
   cfg: OpenClawConfig,
   agentId: string,
@@ -759,7 +766,7 @@ export function listAgentsForGateway(cfg: OpenClawConfig): {
     }
     const identity = entry.identity
       ? {
-          name: normalizeOptionalString(entry.identity.name),
+          name: cleanAgentDisplayName(normalizeOptionalString(entry.identity.name)),
           theme: normalizeOptionalString(entry.identity.theme),
           emoji: normalizeOptionalString(entry.identity.emoji),
           avatar: normalizeOptionalString(entry.identity.avatar),
@@ -771,7 +778,7 @@ export function listAgentsForGateway(cfg: OpenClawConfig): {
         }
       : undefined;
     configuredById.set(normalizeAgentId(entry.id), {
-      name: normalizeOptionalString(entry.name),
+      name: cleanAgentDisplayName(normalizeOptionalString(entry.name)),
       identity,
     });
   }

@@ -26,6 +26,10 @@ from app.config import settings
 
 logger = logging.getLogger("platform.routes.fast_chat")
 router = APIRouter(prefix="/api/fast-chat", tags=["fast-chat"])
+HIDDEN_ASSISTANT_TEXTS = {
+    "HEARTBEAT_OK",
+    "[assistant turn failed before producing content]",
+}
 
 
 class FastChatMessageRequest(BaseModel):
@@ -57,6 +61,46 @@ def _message_row(row: FastChatMessage) -> dict:
         "content": row.content,
         "timestamp": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+def _is_default_main_session_key(key: str) -> bool:
+    return key in {"agent:main:main", "main"}
+
+
+def _is_hidden_assistant_text(text: str) -> bool:
+    return text.strip() in HIDDEN_ASSISTANT_TEXTS
+
+
+def _is_hidden_session_title(title: str | None) -> bool:
+    normalized = (title or "").strip()
+    return (
+        normalized in HIDDEN_ASSISTANT_TEXTS
+        or "heartbeat" in normalized.lower()
+        or "心跳" in normalized
+        or normalized == "main 会话"
+    )
+
+
+def _visible_message_rows(rows: list[FastChatMessage]) -> list[FastChatMessage]:
+    visible: list[FastChatMessage] = []
+    for row in rows:
+        if row.role == "assistant" and _is_hidden_assistant_text(row.content):
+            continue
+        if not row.content.strip():
+            continue
+        visible.append(row)
+    return visible
+
+
+def _should_hide_session(session: FastChatSession, messages: list[FastChatMessage]) -> bool:
+    visible_messages = _visible_message_rows(messages)
+    if not visible_messages:
+        return True
+    if _is_hidden_session_title(session.title):
+        return True
+    if _is_default_main_session_key(session.key) and not any(row.role == "user" for row in visible_messages):
+        return True
+    return False
 
 
 async def _ensure_session(
@@ -111,15 +155,18 @@ async def list_fast_sessions(
         .where(FastChatSession.user_id == user.id)
         .order_by(FastChatSession.updated_at.desc())
     )
-    return [
-        {
+    sessions = []
+    for row in result.scalars().all():
+        messages = await _load_messages(db, user, row.key)
+        if _should_hide_session(row, messages):
+            continue
+        sessions.append({
             "key": row.key,
             "title": row.title,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        }
-        for row in result.scalars().all()
-    ]
+        })
+    return sessions
 
 
 @router.get("/sessions/{session_key:path}")
@@ -131,7 +178,7 @@ async def get_fast_session(
     session = await db.get(FastChatSession, session_key)
     if not session or session.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    messages = await _load_messages(db, user, session_key)
+    messages = _visible_message_rows(await _load_messages(db, user, session_key))
     return {
         "key": session.key,
         "messages": [_message_row(row) for row in messages],

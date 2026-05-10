@@ -41,6 +41,27 @@ function normalizeGeneratedTitle(value: string): string {
 
 const sessionsWithTitleGenerationStarted = new Set<string>();
 const SESSION_LIST_TIMEOUT_MS = 1000;
+const HIDDEN_ASSISTANT_TEXTS = new Set([
+  "HEARTBEAT_OK",
+  "[assistant turn failed before producing content]",
+]);
+
+function isDefaultMainSessionKey(key: string): boolean {
+  return key === "agent:main:main" || key === "main";
+}
+
+function isHiddenAssistantText(text: string): boolean {
+  return HIDDEN_ASSISTANT_TEXTS.has(text.trim());
+}
+
+function isHiddenSessionTitle(title: string): boolean {
+  const normalized = title.trim();
+  return (
+    isHiddenAssistantText(normalized) ||
+    /heartbeat|心跳/i.test(normalized) ||
+    normalized === "main 会话"
+  );
+}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -171,13 +192,19 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
         const rawTitle = String(dn || s.derivedTitle || "");
         const cleaned = cleanSessionTitle(rawTitle);
         const key = toNanobotSessionId(s.key);
+        const title = cleaned || friendlySessionKey(key);
         return {
           key,
           created_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
           updated_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
-          title: cleaned || friendlySessionKey(key),
+          title,
+          hasStoredTitle: Boolean(cleaned),
         };
-      });
+      }).filter((session) => {
+        if (isHiddenSessionTitle(session.title)) return false;
+        if (isDefaultMainSessionKey(session.key) && !session.hasStoredTitle) return false;
+        return true;
+      }).map(({ hasStoredTitle, ...session }) => session);
 
       res.json(sessions);
     } catch (err) {
@@ -206,6 +233,7 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
           // Skip assistant messages with empty content (intermediate agent loop artifacts)
           const text = extractTextContent(m.content);
           if (!text.trim()) return false;
+          if (isHiddenAssistantText(text)) return false;
           return true;
         })
         .map((m) => ({

@@ -84,6 +84,14 @@ function isFastSessionKey(key: string): boolean {
   return key.includes(':fast-')
 }
 
+function isDefaultMainSessionKey(key: string): boolean {
+  return key === 'agent:main:main' || key === 'main'
+}
+
+function isEmptyDefaultMainSession(key: string, detail: SessionDetail): boolean {
+  return isDefaultMainSessionKey(key) && (detail.messages || []).length === 0
+}
+
 function buildFallbackTitleFromText(text = '', fileCount = 0): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
   if (normalized) {
@@ -420,9 +428,37 @@ export default function Chat() {
     try {
       const detail = await getSession(key)
       if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
+      if (isEmptyDefaultMainSession(key, detail)) {
+        activeSessionKeyRef.current = null
+        setActiveSessionKey(null)
+        setMessages([])
+        setPendingFiles([])
+        setChatLoading(false)
+        setIsDraftSession(true)
+        setDraftAgentId('')
+        setAgentPickerOpen(false)
+        setSearchParams({ new: '1' }, { replace: true })
+        void refreshSessions({ silent: true, force: true })
+        setTimeout(() => inputRef.current?.focus(), 100)
+        return
+      }
       applyLoadedMessages(key, detail.messages || [])
     } catch (err: any) {
       if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
+      if (isDefaultMainSessionKey(key)) {
+        activeSessionKeyRef.current = null
+        setActiveSessionKey(null)
+        setMessages([])
+        setPendingFiles([])
+        setChatLoading(false)
+        setIsDraftSession(true)
+        setDraftAgentId('')
+        setAgentPickerOpen(false)
+        setSearchParams({ new: '1' }, { replace: true })
+        void refreshSessions({ silent: true, force: true })
+        setTimeout(() => inputRef.current?.focus(), 100)
+        return
+      }
       toast.error(err?.message || '加载会话失败')
       setMessages([])
     } finally {

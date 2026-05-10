@@ -8,6 +8,60 @@ import { loadConfig } from "../config.js";
 
 const AGENTS_LIST_TIMEOUT_MS = 1000;
 
+function cleanAgentDisplayName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value
+    .replace(/^\s*ident(?:ity|ify)\.md\s*[-:：\u2013\u2014]\s*/i, "")
+    .trim();
+  return cleaned || undefined;
+}
+
+function cleanAgentRow<T extends Record<string, unknown>>(agent: T): T {
+  const next: Record<string, unknown> = { ...agent };
+  const name = cleanAgentDisplayName(next.name);
+  if (name) {
+    next.name = name;
+  } else if (typeof next.name === "string") {
+    delete next.name;
+  }
+
+  const identity = next.identity;
+  if (identity && typeof identity === "object" && !Array.isArray(identity)) {
+    const nextIdentity: Record<string, unknown> = { ...(identity as Record<string, unknown>) };
+    const identityName = cleanAgentDisplayName(nextIdentity.name);
+    if (identityName) {
+      nextIdentity.name = identityName;
+    } else if (typeof nextIdentity.name === "string") {
+      delete nextIdentity.name;
+    }
+    next.identity = nextIdentity;
+  }
+
+  return next as T;
+}
+
+function cleanAgentsListResult(result: unknown): unknown {
+  if (Array.isArray(result)) {
+    return result.map((agent) =>
+      agent && typeof agent === "object" && !Array.isArray(agent)
+        ? cleanAgentRow(agent as Record<string, unknown>)
+        : agent,
+    );
+  }
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const next: Record<string, unknown> = { ...(result as Record<string, unknown>) };
+    if (Array.isArray(next.agents)) {
+      next.agents = next.agents.map((agent) =>
+        agent && typeof agent === "object" && !Array.isArray(agent)
+          ? cleanAgentRow(agent as Record<string, unknown>)
+          : agent,
+      );
+    }
+    return next;
+  }
+  return result;
+}
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -36,10 +90,12 @@ function fallbackAgentsList() {
   }
   const agents = configuredAgents.map((agent) => ({
     id: typeof agent.id === "string" ? agent.id : "",
-    name: typeof agent.name === "string" ? agent.name : agent.id,
+    name: cleanAgentDisplayName(agent.name) || agent.id,
     workspace: typeof agent.workspace === "string" ? agent.workspace : undefined,
     model: typeof agent.model === "string" ? { primary: agent.model } : agent.model,
-    identity: agent.identity,
+    identity: agent.identity && typeof agent.identity === "object" && !Array.isArray(agent.identity)
+      ? cleanAgentRow({ identity: agent.identity }).identity
+      : agent.identity,
   })).filter((agent) => agent.id);
   const defaultId =
     configuredAgents.find((agent) => agent.default)?.id ||
@@ -194,7 +250,7 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
         res.json(fallbackAgentsList());
         return;
       }
-      res.json(result || []);
+      res.json(cleanAgentsListResult(result || []));
     } catch (err) {
       res.setHeader("X-OpenClaw-Partial", "agents-error");
       res.json(fallbackAgentsList());
