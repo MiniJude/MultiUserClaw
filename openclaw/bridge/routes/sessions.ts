@@ -40,6 +40,21 @@ function normalizeGeneratedTitle(value: string): string {
 }
 
 const sessionsWithTitleGenerationStarted = new Set<string>();
+const SESSION_LIST_TIMEOUT_MS = 1000;
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 async function generateSessionTitle(message: string): Promise<string> {
   const fallback = "新对话";
@@ -131,11 +146,24 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
   const router = Router();
 
   // GET /api/sessions — list sessions
-  router.get("/sessions", asyncHandler(async (_req, res) => {
+  router.get("/sessions", asyncHandler(async (req, res) => {
     try {
-      const result = await client.request<OpenclawSessionsListResult>("sessions.list", {
-        includeDerivedTitles: true,
-      });
+      const rawLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+      const limit = Number.isFinite(rawLimit)
+        ? Math.max(1, Math.min(50, Math.floor(rawLimit as number)))
+        : undefined;
+      const result = await withTimeout(
+        client.request<OpenclawSessionsListResult>("sessions.list", {
+          includeDerivedTitles: true,
+          ...(limit ? { limit } : {}),
+        }),
+        SESSION_LIST_TIMEOUT_MS,
+      );
+      if (!result) {
+        res.setHeader("X-OpenClaw-Partial", "sessions-timeout");
+        res.json([]);
+        return;
+      }
 
       const sessions = (result.sessions || []).map((s: OpenclawSessionRow) => {
         // Skip generic origin labels (e.g. "OpenClaw Bridge") — prefer derivedTitle (user's first message)

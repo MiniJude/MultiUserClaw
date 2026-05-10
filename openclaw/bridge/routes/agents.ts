@@ -4,6 +4,56 @@ import path from "node:path";
 import os from "node:os";
 import type { BridgeGatewayClient } from "../gateway-client.js";
 import { asyncHandler } from "../utils.js";
+import { loadConfig } from "../config.js";
+
+const AGENTS_LIST_TIMEOUT_MS = 1000;
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function fallbackAgentsList() {
+  const config = loadConfig();
+  const configPath = path.join(config.openclawHome, "openclaw.json");
+  let configuredAgents: Array<Record<string, unknown>> = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as {
+      agents?: { list?: Array<Record<string, unknown>> };
+    };
+    configuredAgents = Array.isArray(raw.agents?.list) ? raw.agents.list : [];
+  } catch {
+    configuredAgents = [];
+  }
+  const agents = configuredAgents.map((agent) => ({
+    id: typeof agent.id === "string" ? agent.id : "",
+    name: typeof agent.name === "string" ? agent.name : agent.id,
+    workspace: typeof agent.workspace === "string" ? agent.workspace : undefined,
+    model: typeof agent.model === "string" ? { primary: agent.model } : agent.model,
+    identity: agent.identity,
+  })).filter((agent) => agent.id);
+  const defaultId =
+    configuredAgents.find((agent) => agent.default)?.id ||
+    configuredAgents.find((agent) => agent.id === "main")?.id ||
+    agents[0]?.id ||
+    "main";
+
+  return {
+    defaultId,
+    mainKey: "main",
+    scope: "per-sender",
+    agents,
+  };
+}
 
 function hashText(input: string): number {
   let hash = 2166136261;
@@ -138,10 +188,16 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
   // GET /api/agents — list agents
   router.get("/agents", asyncHandler(async (_req, res) => {
     try {
-      const result = await client.request<unknown[]>("agents.list", {});
+      const result = await withTimeout(client.request<unknown[]>("agents.list", {}), AGENTS_LIST_TIMEOUT_MS);
+      if (!result) {
+        res.setHeader("X-OpenClaw-Partial", "agents-timeout");
+        res.json(fallbackAgentsList());
+        return;
+      }
       res.json(result || []);
     } catch (err) {
-      res.status(500).json({ detail: (err as Error).message });
+      res.setHeader("X-OpenClaw-Partial", "agents-error");
+      res.json(fallbackAgentsList());
     }
   }));
 

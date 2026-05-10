@@ -347,6 +347,7 @@ export function isLoggedIn(): boolean {
 // ---------------------------------------------------------------------------
 
 let refreshPromise: Promise<boolean> | null = null
+const OPENCLAW_SESSION_LIST_LIMIT = 5
 
 async function parseErrorMessage(res: Response): Promise<string> {
   const fallback = `请求失败 (${res.status})`
@@ -753,7 +754,7 @@ export async function listSessions(options: { force?: boolean } = {}): Promise<S
 
   sessionsRequest = Promise.allSettled([
     fetchJSON<Session[]>('/api/fast-chat/sessions'),
-    fetchJSON<Session[]>('/api/openclaw/sessions'),
+    fetchJSON<Session[]>(`/api/openclaw/sessions?limit=${OPENCLAW_SESSION_LIST_LIMIT}`),
   ])
     .then(results => {
       const merged = new Map<string, Session>()

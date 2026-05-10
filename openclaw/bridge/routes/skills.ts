@@ -180,7 +180,8 @@ export function skillsRoutes(config: BridgeConfig, client: BridgeGatewayClient):
 
   // GET /api/skills/scopes
   router.get("/skills/scopes", asyncHandler(async (_req, res) => {
-    res.json(await listSkillScopes(config, client));
+    res.setHeader("X-OpenClaw-Partial", "scopes-config-only");
+    res.json(await listSkillScopes(config));
   }));
 
   // GET /api/skills
