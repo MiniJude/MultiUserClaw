@@ -80,6 +80,71 @@ async def _container_api_request(
     return payload
 
 
+async def _container_api_json_request(
+    db: AsyncSession,
+    user: User,
+    method: str,
+    path: str,
+    *,
+    json: dict | None = None,
+    params: dict | None = None,
+    timeout: float = 8.0,
+) -> object | None:
+    """Best-effort request to a running container without cold-starting it."""
+    if settings.dev_openclaw_url:
+        base_url = settings.dev_openclaw_url.rstrip("/")
+        target_url = f"{base_url}{path}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout, connect=0.5),
+                trust_env=False,
+            ) as client:
+                response = await client.request(
+                    method=method,
+                    url=target_url,
+                    params=params,
+                    json=json,
+                )
+        except httpx.HTTPError:
+            return None
+
+        if response.status_code >= 400:
+            return None
+
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
+    record = await get_container(db, user.id)
+    if record is None or not record.internal_host or not record.internal_port:
+        return None
+
+    base_url = f"http://{record.internal_host}:{record.internal_port}"
+    target_url = f"{base_url}{path}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=0.5),
+            trust_env=False,
+        ) as client:
+            response = await client.request(
+                method=method,
+                url=target_url,
+                params=params,
+                json=json,
+            )
+    except httpx.HTTPError:
+        return None
+
+    if response.status_code >= 400:
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Container info & maintenance (must be before the catch-all route)
 # ---------------------------------------------------------------------------
@@ -361,6 +426,116 @@ async def proxy_events_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/sessions")
+async def list_openclaw_sessions_light(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List dedicated OpenClaw sessions without cold-starting the runtime."""
+    if user.runtime_mode == "shared":
+        from app.shared_runtime import shared_runtime_request, ensure_shared_agent_binding
+
+        await ensure_shared_agent_binding(db, user)
+        payload = await shared_runtime_request(
+            "GET",
+            "/api/sessions",
+            params=dict(request.query_params) if request.query_params else None,
+            timeout=5,
+        )
+        return payload if isinstance(payload, list) else []
+
+    payload = await _container_api_json_request(
+        db,
+        user,
+        "GET",
+        "/api/sessions",
+        params=dict(request.query_params) if request.query_params else None,
+        timeout=2.5,
+    )
+    return payload if isinstance(payload, list) else []
+
+
+@router.get("/sessions/{session_key}")
+async def get_openclaw_session_light(
+    session_key: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a dedicated OpenClaw session without cold-starting the runtime when it is already up."""
+    if user.runtime_mode == "shared":
+        from app.shared_runtime import ensure_shared_agent_binding, shared_runtime_request
+
+        await ensure_shared_agent_binding(db, user)
+        payload = await shared_runtime_request(
+            "GET",
+            f"/api/sessions/{session_key}",
+            timeout=8,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    payload = await _container_api_json_request(
+        db,
+        user,
+        "GET",
+        f"/api/sessions/{session_key}",
+        timeout=4.0,
+    )
+    if isinstance(payload, dict):
+        return payload
+
+    return await _container_api_request(
+        db,
+        user,
+        "GET",
+        f"/api/sessions/{session_key}",
+        timeout=30.0,
+    )
+
+
+@router.get("/agents")
+async def list_openclaw_agents_light(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List agents without cold-starting the dedicated runtime."""
+    fallback = {
+        "defaultId": "main",
+        "mainKey": "main",
+        "scope": "fallback",
+        "agents": [
+            {
+                "id": "main",
+                "name": "默认对话",
+                "identity": {"name": "默认对话"},
+            }
+        ],
+    }
+    if user.runtime_mode == "shared":
+        return fallback
+
+    record = await get_container(db, user.id)
+    if record is None or record.status != "running" or not record.internal_host:
+        return fallback
+    if record.internal_host not in {"127.0.0.1", "localhost"}:
+        return fallback
+
+    target_url = f"http://{record.internal_host}:{record.internal_port}/api/agents"
+    try:
+        async with httpx.AsyncClient(timeout=0.5, trust_env=False) as client:
+            resp = await client.get(target_url)
+    except httpx.HTTPError:
+        return fallback
+
+    if resp.status_code >= 400:
+        return fallback
+    try:
+        payload = resp.json()
+    except ValueError:
+        return fallback
+    return payload if isinstance(payload, dict) else fallback
 
 
 # ---------------------------------------------------------------------------

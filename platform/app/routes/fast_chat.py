@@ -140,6 +140,8 @@ def _system_prompt(agent_id: str, agent_name: str | None) -> str:
     return (
         f"你是 OpenClaw 平台里的{name}。"
         "默认用中文回答，简洁、直接、可执行。"
+        "当前是快速对话链路，没有工具执行能力。"
+        "绝不要输出 <minimax:tool_call>、<invoke>、<tool_call> 等伪工具调用标签。"
         "如果用户需要操作文件、运行命令、使用浏览器、长期任务、深度记忆召回或 OpenViking 工具，"
         "请明确说明需要切换到增强 Agent 模式。"
     )

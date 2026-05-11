@@ -84,6 +84,15 @@ function isFastSessionKey(key: string): boolean {
   return key.includes(':fast-')
 }
 
+function buildNewSessionKey(agentId: string): string {
+  const resolvedAgentId = agentId || 'main'
+  const sessionSuffix = Date.now()
+  if (resolvedAgentId === 'main') {
+    return `agent:${resolvedAgentId}:fast-${sessionSuffix}`
+  }
+  return `agent:${resolvedAgentId}:session-${sessionSuffix}`
+}
+
 function isDefaultMainSessionKey(key: string): boolean {
   return key === 'agent:main:main' || key === 'main'
 }
@@ -601,6 +610,10 @@ export default function Chat() {
   // Connect SSE on mount
   useEffect(() => {
     console.log('[SSE] useEffect 触发')
+    if (!activeSessionKey || isFastSessionKey(activeSessionKey)) {
+      console.log('[SSE] 当前不是 OpenClaw dedicated 会话，跳过SSE连接')
+      return
+    }
     const token = getAccessToken()
     if (!token) {
       console.log('[SSE] 没有token，跳过SSE连接')
@@ -641,7 +654,7 @@ export default function Chat() {
       sse.close()
       sseRef.current = null
     }
-  }, [handleChatEvent])
+  }, [activeSessionKey, handleChatEvent])
 
   const waitForResponse = async (key: string, runId: string | null) => {
     // SSE handles incremental display. Completion should come from runId-based
@@ -715,7 +728,7 @@ export default function Chat() {
     if ((!text && pendingFiles.length === 0) || (!activeSessionKeyRef.current && !isDraftSession) || chatLoading) return
 
     const requestedAgentId = draftAgentId || searchParams.get('agent') || 'main'
-    const sendingSessionKey = activeSessionKeyRef.current || `agent:${requestedAgentId || 'main'}:fast-${Date.now()}`
+    const sendingSessionKey = activeSessionKeyRef.current || buildNewSessionKey(requestedAgentId)
     if (sendingBySession[sendingSessionKey]) return
     abortedSessionRef.current[sendingSessionKey] = false
     const isFirstTurn = !activeSessionKeyRef.current

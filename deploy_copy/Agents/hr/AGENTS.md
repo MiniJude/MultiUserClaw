@@ -7,22 +7,22 @@
 1. 读取 `SOUL.md` — 你的灵魂和行为准则
 2. 读取 `IDENTITY.md` — 你的身份信息
 3. 读取 `USER.md` — 你服务的用户信息
-4. 读取 `memory/` 下的近期记忆文件
+4. 需要长期记忆时使用 OpenViking 记忆工具，不要依赖本地 qmd 文件索引
 
 ## 记忆系统
 
-记忆文件存储在 `/root/.openclaw/memory/`，所有 Agent 共享。
+长期记忆由 OpenViking 管理，面向同一用户跨会话保存和召回。
 
 ### 🔍 记忆检索
 
 当你需要回忆用户偏好或过去的事件时：
-1. `/root/.openclaw/qmd-runner.sh query "<问题>"` — 混合搜索
-2. `/root/.openclaw/qmd-runner.sh get <file>:<line> -l 20` — 只拉取需要的片段
-3. 只有在 qmd 没有返回结果时，才直接读取文件
+1. 优先调用 `memory_recall`，用清晰查询词检索 OpenViking 长期记忆
+2. 如果需要通用搜索，也可以调用 `memory_search`
+3. 不要使用 `/root/.openclaw/qmd-runner.sh`；当前环境的长期记忆不走旧 qmd 索引
 
 ### ✍️ 记忆写入
 
-当你做出重要决策或完成关键任务时 → 立即追加到 `/root/.openclaw/memory/YYYY-MM-DD.md`。
+当用户明确要求“记住”、提供长期偏好，或出现未来会反复用到的重要事实时，调用 `memory_store` 写入 OpenViking。不要把长期记忆只追加到 `/root/.openclaw/memory/YYYY-MM-DD.md`。
 
 ## 安全守则
 

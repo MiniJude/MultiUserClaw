@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import asyncio
 from typing import Any
 from urllib.parse import unquote
 
@@ -17,8 +18,9 @@ from app.auth.dependencies import get_current_user
 from app.config import settings
 from app.container.manager import (
     _expected_openviking_name,
+    _ensure_openviking_sidecar,
     _openviking_api_key_for_user,
-    ensure_running,
+    _published_binding,
 )
 from app.db.engine import get_db
 from app.db.models import User
@@ -26,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("platform.routes.openviking")
 router = APIRouter(prefix="/api/openviking", tags=["openviking"])
+_SIDECAR_BASE_CACHE: dict[str, tuple[str, float]] = {}
+_SIDECAR_BASE_CACHE_TTL = 30.0
 
 
 class OpenVikingSearchRequest(BaseModel):
@@ -67,20 +71,59 @@ def _tenant_headers(user_id: str) -> dict[str, str]:
     }
 
 
+async def _wait_sidecar_ready(base_url: str, headers: dict[str, str], timeout: float = 12) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
+                response = await client.get(f"{base_url}/health", headers=headers)
+            if response.status_code < 500:
+                return
+        except httpx.HTTPError as exc:
+            last_error = exc
+        await asyncio.sleep(0.4)
+    if last_error:
+        logger.info("OpenViking sidecar did not become ready within %.1fs: %s", timeout, last_error)
+
+
 async def _sidecar_base_url(user: User, db: AsyncSession) -> str:
     if not settings.user_openviking_enabled:
         raise HTTPException(status_code=404, detail="OpenViking is not enabled")
     if user.runtime_mode == "shared":
         raise HTTPException(status_code=409, detail="OpenViking panel only supports dedicated user runtime")
 
-    await ensure_running(db, user.id)
+    cached = _SIDECAR_BASE_CACHE.get(user.id)
+    now = time.monotonic()
+    if cached and cached[1] > now:
+        return cached[0]
+
+    await asyncio.to_thread(_ensure_openviking_sidecar, user.id)
     sidecar_name = _expected_openviking_name(user.id)
-    return f"http://{sidecar_name}:{settings.user_openviking_port}"
+    base_url = f"http://{sidecar_name}:{settings.user_openviking_port}"
+    try:
+        def _resolve_published_url() -> str | None:
+            sidecar = docker.from_env().containers.get(sidecar_name)
+            sidecar.reload()
+            host_ip, host_port = _published_binding(sidecar, f"{settings.user_openviking_port}/tcp")
+            if not host_port:
+                return None
+            host = host_ip if host_ip and host_ip not in {"0.0.0.0", "::"} else "127.0.0.1"
+            return f"http://{host}:{host_port}"
+
+        published_url = await asyncio.to_thread(_resolve_published_url)
+        if published_url:
+            base_url = published_url
+    except Exception as exc:
+        logger.debug("Failed to resolve published OpenViking port for %s: %s", sidecar_name, exc)
+    await _wait_sidecar_ready(base_url, _tenant_headers(user.id))
+    _SIDECAR_BASE_CACHE[user.id] = (base_url, now + _SIDECAR_BASE_CACHE_TTL)
+    return base_url
 
 
-async def _openviking_request(
-    user: User,
-    db: AsyncSession,
+async def _request_openviking_base(
+    base_url: str,
+    headers: dict[str, str],
     method: str,
     path: str,
     *,
@@ -88,11 +131,8 @@ async def _openviking_request(
     params: dict[str, Any] | None = None,
     timeout: float = 30,
 ) -> Any:
-    base_url = await _sidecar_base_url(user, db)
-    headers = _tenant_headers(user.id)
-
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.request(
                 method,
                 f"{base_url}{path}",
@@ -118,6 +158,27 @@ async def _openviking_request(
             detail = payload
         raise HTTPException(status_code=response.status_code, detail=detail or "OpenViking request failed")
     return payload
+
+
+async def _openviking_request(
+    user: User,
+    db: AsyncSession,
+    method: str,
+    path: str,
+    *,
+    json: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    timeout: float = 30,
+) -> Any:
+    return await _request_openviking_base(
+        await _sidecar_base_url(user, db),
+        _tenant_headers(user.id),
+        method,
+        path,
+        json=json,
+        params=params,
+        timeout=timeout,
+    )
 
 
 def _docker_sidecar_status(user_id: str) -> dict[str, Any]:
@@ -188,7 +249,6 @@ async def openviking_summary(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    sidecar = _docker_sidecar_status(user.id)
     calls = {
         "health": ("GET", "/health", None),
         "ready": ("GET", "/ready", None),
@@ -199,14 +259,49 @@ async def openviking_summary(
         "retrieval": ("GET", "/api/v1/observer/retrieval", None),
         "vectorCount": ("GET", "/api/v1/debug/vector/count", None),
     }
-    results: dict[str, Any] = {"sidecar": sidecar}
+    results: dict[str, Any] = {}
     errors: dict[str, str] = {}
+    base_url = await _sidecar_base_url(user, db)
+    headers = _tenant_headers(user.id)
+    results["sidecar"] = _docker_sidecar_status(user.id)
 
-    for key, (method, path, params) in calls.items():
+    async def _run_check(
+        client: httpx.AsyncClient,
+        key: str,
+        method: str,
+        path: str,
+        params: Any,
+    ) -> tuple[str, Any, str | None]:
         try:
-            results[key] = await _openviking_request(user, db, method, path, params=params, timeout=12)
-        except HTTPException as exc:
-            errors[key] = str(exc.detail)
+            response = await client.request(
+                method,
+                f"{base_url}{path}",
+                headers=headers,
+                params=params,
+            )
+            try:
+                value: Any = response.json()
+            except ValueError:
+                value = response.text
+            if response.status_code >= 400:
+                if isinstance(value, dict):
+                    detail = value.get("detail") or value.get("error") or value.get("message")
+                else:
+                    detail = value
+                return key, None, str(detail or "OpenViking request failed")
+            return key, value, None
+        except httpx.HTTPError as exc:
+            return key, None, f"OpenViking request failed: {exc}"
+
+    async with httpx.AsyncClient(timeout=4, trust_env=False) as client:
+        checks = await asyncio.gather(
+            *[_run_check(client, key, method, path, params) for key, (method, path, params) in calls.items()]
+        )
+    for key, value, error in checks:
+        if error:
+            errors[key] = error
+        else:
+            results[key] = value
 
     results["errors"] = errors
     results["recentLogs"] = _recent_sidecar_logs(user.id)
@@ -287,18 +382,23 @@ async def openviking_memory_list(
     db: AsyncSession = Depends(get_db),
 ):
     root = f"viking://user/{user.id}/memories"
-    payload = await _openviking_request(
-        user,
-        db,
-        "GET",
-        "/api/v1/fs/tree",
-        params={
-            "uri": root if not category else f"{root}/{category}",
-            "level_limit": 8,
-            "limit": max(20, min(limit * 4, 240)),
-        },
-        timeout=25,
-    )
+    try:
+        payload = await _openviking_request(
+            user,
+            db,
+            "GET",
+            "/api/v1/fs/tree",
+            params={
+                "uri": root if not category else f"{root}/{category}",
+                "level_limit": 8,
+                "limit": max(20, min(limit * 4, 240)),
+            },
+            timeout=8,
+        )
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        payload = {"result": []}
     entries = payload.get("result") if isinstance(payload, dict) else []
     if not isinstance(entries, list):
         entries = []

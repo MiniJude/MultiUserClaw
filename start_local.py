@@ -770,6 +770,35 @@ def tail_output(procs: dict):
             t.join(timeout=2)
 
 
+def wait_processes_silently(procs: dict):
+    """Keep long-running child stdout drained when --no-tail is used."""
+    stop_event = threading.Event()
+
+    def _drain(proc: "subprocess.Popen"):
+        try:
+            for _ in iter(proc.stdout.readline, b""):
+                if stop_event.is_set():
+                    break
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    threads = []
+    for proc in procs.values():
+        if proc and proc.stdout:
+            t = threading.Thread(target=_drain, args=(proc,), daemon=True)
+            t.start()
+            threads.append(t)
+
+    try:
+        for proc in procs.values():
+            if proc:
+                proc.wait()
+    finally:
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=1)
+
+
 # ── 停止所有服务 ──────────────────────────────────────────────────────
 
 def stop_all():
@@ -1504,10 +1533,7 @@ def main():
         if not args.no_tail:
             tail_output(processes)
         else:
-            # 等待所有进程
-            for proc in processes.values():
-                if proc:
-                    proc.wait()
+            wait_processes_silently(processes)
 
     except KeyboardInterrupt:
         print(f"\n\n{YELLOW}正在停止服务...{RESET}")

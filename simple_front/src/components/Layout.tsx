@@ -94,6 +94,10 @@ function isUserChatSession(session: Session): boolean {
   return session.key.startsWith('agent:')
 }
 
+function isFastSessionKey(key: string): boolean {
+  return key.includes(':fast-')
+}
+
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return ''
   const diffMs = Date.now() - new Date(iso).getTime()
@@ -345,6 +349,7 @@ export default function Layout() {
   }, [activeSessionKey, markSessionRead])
 
   useEffect(() => {
+    if (!activeSessionKey || isFastSessionKey(activeSessionKey)) return
     const token = getAccessToken()
     if (!token) return
 
@@ -384,7 +389,7 @@ export default function Layout() {
     }
 
     return () => sse.close()
-  }, [markSessionRead, markSessionUnread, refreshSessions, resolveKnownSessionKey, setSessionThinking])
+  }, [activeSessionKey, markSessionRead, markSessionUnread, refreshSessions, resolveKnownSessionKey, setSessionThinking])
 
   const currentSessionTitle = useMemo(() => {
     if (!activeSessionKey) return null

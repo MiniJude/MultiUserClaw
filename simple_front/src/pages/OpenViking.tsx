@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -237,7 +237,7 @@ export default function OpenViking() {
   const [memoryCards, setMemoryCards] = useState<OpenVikingMemoryCard[]>([])
   const [memoryScope, setMemoryScope] = useState('all')
   const [activeTab, setActiveTab] = useState<TabKey>('memory')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [query, setQuery] = useState('')
   const [targetUri, setTargetUri] = useState('')
@@ -249,6 +249,7 @@ export default function OpenViking() {
   const [memoryUri, setMemoryUri] = useState('viking://resources/manual-memory.md')
   const [memoryDraft, setMemoryDraft] = useState('')
   const [writingMemory, setWritingMemory] = useState(false)
+  const initialLoadStartedRef = useRef(false)
 
   const memoryStats = unwrap(summary?.memoryStats)
   const queue = unwrap(summary?.queue)
@@ -274,19 +275,22 @@ export default function OpenViking() {
     if (silent) {
       setRefreshing(true)
     } else {
-      setLoading(true)
+      setLoading(false)
     }
     try {
-      const [nextSummary, nextSessions, nextMemories, nextMemoryCards] = await Promise.all([
+      const [nextSummary, nextMemoryCards] = await Promise.all([
         getOpenVikingSummary(),
-        listOpenVikingSessions(),
-        listOpenVikingMemories(30),
-        listOpenVikingMemoryCards(80),
+        listOpenVikingMemoryCards(30),
       ])
       setSummary(nextSummary)
+      setMemoryCards(nextMemoryCards.result?.memories || [])
+      setLoading(false)
+      const [nextSessions, nextMemories] = await Promise.all([
+        listOpenVikingSessions(),
+        listOpenVikingMemories(30),
+      ])
       setSessions(nextSessions.result || [])
       setMemories(nextMemories)
-      setMemoryCards(nextMemoryCards.result?.memories || [])
       setSelectedSessionId(current => current || nextSessions.result?.[0]?.session_id || '')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '读取 OpenViking 状态失败')
@@ -297,6 +301,8 @@ export default function OpenViking() {
   }, [toast])
 
   useEffect(() => {
+    if (initialLoadStartedRef.current) return
+    initialLoadStartedRef.current = true
     void loadAll()
   }, [loadAll])
 

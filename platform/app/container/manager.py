@@ -10,7 +10,9 @@ import logging
 import secrets
 import tarfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import docker
 from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
@@ -80,6 +82,22 @@ def _expected_openviking_volume(user_id: str) -> str:
     return f"openviking-data-{user_id[:8]}"
 
 
+def _user_container_proxy_url() -> str:
+    configured = settings.container_proxy_url.strip()
+    if configured:
+        return configured
+    if settings.user_container_api_via_host:
+        return f"http://host.docker.internal:{settings.port}/llm/v1"
+    return "http://gateway:8080/llm/v1"
+
+
+def _extra_hosts_for_proxy_url(proxy_url: str) -> list[str]:
+    host = urlparse(proxy_url).hostname
+    if host == "host.docker.internal":
+        return ["host.docker.internal:host-gateway"]
+    return []
+
+
 def _openviking_api_key_for_user(user_id: str) -> str:
     if settings.user_openviking_api_key:
         return settings.user_openviking_api_key
@@ -113,6 +131,7 @@ def _build_openviking_plugin_config(user_id: str) -> dict:
             "allow": ["openviking"],
             "slots": {
                 "contextEngine": "openviking",
+                "memory": "none",
             },
             "entries": {
                 "openviking": {
@@ -121,6 +140,9 @@ def _build_openviking_plugin_config(user_id: str) -> dict:
                         "allowConversationAccess": True,
                     },
                     "config": config,
+                },
+                "memory-core": {
+                    "enabled": False,
                 },
             },
         },
@@ -278,7 +300,16 @@ def _ensure_openviking_sidecar(user_id: str) -> docker.models.containers.Contain
         elif sidecar.status != "running":
             sidecar.start()
             sidecar.reload()
-        return sidecar
+        if settings.user_container_publish_ports:
+            sidecar.reload()
+            _, host_port = _published_binding(sidecar, f"{settings.user_openviking_port}/tcp")
+            if not host_port:
+                logger.info("Recreating OpenViking sidecar %s to publish local dev port", sidecar_name)
+                sidecar.remove(force=True)
+            else:
+                return sidecar
+        else:
+            return sidecar
     except DockerNotFound:
         pass
 
@@ -290,23 +321,29 @@ def _ensure_openviking_sidecar(user_id: str) -> docker.models.containers.Contain
     )
     environment["OPENVIKING_API_KEY"] = _openviking_api_key_for_user(user_id)
 
-    return client.containers.run(
-        image=settings.user_openviking_image,
-        name=sidecar_name,
-        detach=True,
-        environment=environment,
-        mounts=[
+    run_kwargs = {
+        "image": settings.user_openviking_image,
+        "name": sidecar_name,
+        "detach": True,
+        "environment": environment,
+        "mounts": [
             docker.types.Mount("/app/.openviking", data_volume, type="volume"),
         ],
-        network=settings.container_network,
-        mem_limit=settings.user_openviking_memory_limit,
-        nano_cpus=int(settings.user_openviking_cpu_limit * 1e9),
-        restart_policy={"Name": "unless-stopped"},
-        labels={
+        "network": settings.container_network,
+        "mem_limit": settings.user_openviking_memory_limit,
+        "nano_cpus": int(settings.user_openviking_cpu_limit * 1e9),
+        "restart_policy": {"Name": "unless-stopped"},
+        "labels": {
             "openclaw.user_id": user_id,
             "openclaw.sidecar": "openviking",
         },
-    )
+    }
+    if settings.user_container_publish_ports:
+        run_kwargs["ports"] = {
+            f"{settings.user_openviking_port}/tcp": (settings.user_openviking_bind_ip, None),
+        }
+
+    return client.containers.run(**run_kwargs)
 
 
 def _openviking_sidecar_exists(user_id: str) -> bool:
@@ -382,6 +419,32 @@ def _container_uses_current_image(container: docker.models.containers.Container)
         return container.attrs.get("Image") == current_image.id
     except Exception:
         # If Docker cannot resolve the image, avoid forcing a recreate loop.
+        return True
+
+
+def _container_uses_current_proxy(container: docker.models.containers.Container) -> bool:
+    """Return whether a user container has the current model proxy wiring."""
+    expected_url = _user_container_proxy_url()
+    expected_extra_hosts = _extra_hosts_for_proxy_url(expected_url)
+    try:
+        container.reload()
+        env_values = container.attrs.get("Config", {}).get("Env", []) or []
+        current_url = ""
+        for value in env_values:
+            if isinstance(value, str) and value.startswith("NANOBOT_PROXY__URL="):
+                current_url = value.split("=", 1)[1]
+                break
+        if current_url != expected_url:
+            return False
+
+        if expected_extra_hosts:
+            extra_hosts = container.attrs.get("HostConfig", {}).get("ExtraHosts", []) or []
+            for expected in expected_extra_hosts:
+                host = expected.split(":", 1)[0]
+                if not any(isinstance(item, str) and item.startswith(f"{host}:") for item in extra_hosts):
+                    return False
+        return True
+    except Exception:
         return True
 
 
@@ -627,8 +690,9 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     # user_row = user_result.scalar_one_or_none()
     # sso_token = user_row.sso_token if user_row else None
 
+    proxy_url = _user_container_proxy_url()
     container_env = {
-        "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
+        "NANOBOT_PROXY__URL": proxy_url,
         "NANOBOT_PROXY__TOKEN": container_token,
         "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
         "DEPLOY_VERSION": settings.deploy_version,
@@ -656,6 +720,9 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         "pids_limit": settings.container_pids_limit,
         "restart_policy": {"Name": "unless-stopped"},
     }
+    extra_hosts = _extra_hosts_for_proxy_url(proxy_url)
+    if extra_hosts:
+        run_kwargs["extra_hosts"] = extra_hosts
 
     if settings.user_container_publish_ports:
         binding = await get_user_port_binding(db, user_id)
@@ -765,9 +832,21 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
 
     # Another request is still creating the container — wait for it
     if record.status == "creating":
+        created_at = record.created_at
+        if created_at is not None and created_at < datetime.utcnow() - timedelta(minutes=2):
+            logger.warning("Removing stale creating container record for user %s", user_id)
+            await db.delete(record)
+            await db.commit()
+            created = await create_container(db, user_id)
+            if created is not None:
+                return created
+            record = await get_container(db, user_id)
+            if record is None:
+                raise RuntimeError("Failed to recreate stale container record")
+
         for _ in range(30):  # wait up to 60s
             await asyncio.sleep(2)
-            await db.expire(record)
+            db.expire(record)
             record = await get_container(db, user_id)
             if record is None or record.status != "creating":
                 break
@@ -787,6 +866,8 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             if c.name != _expected_container_name(user_id):
                 return await _recreate_container_record(db, record, c)
             if not _container_uses_current_image(c):
+                return await _recreate_container_record(db, record, c)
+            if not _container_uses_current_proxy(c):
                 return await _recreate_container_record(db, record, c)
         except DockerNotFound:
             await db.delete(record)

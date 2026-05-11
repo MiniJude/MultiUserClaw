@@ -1,9 +1,11 @@
 """Authentication API routes."""
 
 from pydantic import BaseModel, EmailStr
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+from app.container.manager import _ensure_openviking_sidecar
 from app.auth.service import (
     AuthFailureReason,
     authenticate_user_with_reason,
@@ -91,7 +93,11 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    req: LoginRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     user, failure_reason = await authenticate_user_with_reason(db, req.username, req.password)
     if user is None:
         detail = "登录失败"
@@ -117,6 +123,8 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         detail={"role": user.role},
         commit=True,
     )
+    if settings.user_openviking_enabled and user.runtime_mode == "dedicated":
+        background_tasks.add_task(_ensure_openviking_sidecar, user.id)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),

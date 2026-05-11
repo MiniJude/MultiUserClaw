@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     user_openviking_enabled: bool = False
     user_openviking_image: str = "ghcr.io/volcengine/openviking:latest"
     user_openviking_port: int = 1933
+    user_openviking_bind_ip: str = "127.0.0.1"
     user_openviking_memory_limit: str = "1g"
     user_openviking_cpu_limit: float = 1.0
     user_openviking_api_key: str = ""
@@ -112,6 +113,7 @@ class Settings(BaseSettings):
     # Platform gateway
     host: str = "0.0.0.0"
     port: int = 8080
+    container_proxy_url: str = ""
 
     # Public-facing base URL (used to generate external access URLs in port mapping)
     public_base_url: str = "http://www.exmaple.com"
