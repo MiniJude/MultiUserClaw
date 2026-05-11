@@ -67,3 +67,6 @@ openclaw/packages/libsignal-node/
 phone_front/dist
 hermes-agent/deploy_copy
 .qoder
+
+# Local run logs, screenshots, and verification artifacts.
+.artifacts/
