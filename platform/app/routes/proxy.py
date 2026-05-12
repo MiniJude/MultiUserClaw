@@ -516,25 +516,13 @@ async def list_openclaw_agents_light(
     if user.runtime_mode == "shared":
         return fallback
 
-    record = await get_container(db, user.id)
-    if record is None or record.status != "running" or not record.internal_host:
-        return fallback
-    if record.internal_host not in {"127.0.0.1", "localhost"}:
-        return fallback
-
-    target_url = f"http://{record.internal_host}:{record.internal_port}/api/agents"
-    try:
-        async with httpx.AsyncClient(timeout=0.5, trust_env=False) as client:
-            resp = await client.get(target_url)
-    except httpx.HTTPError:
-        return fallback
-
-    if resp.status_code >= 400:
-        return fallback
-    try:
-        payload = resp.json()
-    except ValueError:
-        return fallback
+    payload = await _container_api_json_request(
+        db,
+        user,
+        "GET",
+        "/api/agents",
+        timeout=3.0,
+    )
     return payload if isinstance(payload, dict) else fallback
 
 
@@ -713,7 +701,7 @@ async def proxy_websocket(
         else:
             container = await ensure_running(db, user.id)
             # Connect to bridge WS relay (port 18080), not gateway directly
-            target_ws_url = f"ws://{container.internal_host}:18080/ws"
+            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/ws"
     # DB session is now released — not held during long-lived WebSocket relay
 
     await websocket.accept()
@@ -794,7 +782,7 @@ async def proxy_terminal_websocket(
             target_ws_url = target_ws_url.rstrip("/") + "/api/terminal/ws"
         else:
             container = await ensure_running(db, user.id)
-            target_ws_url = f"ws://{container.internal_host}:18080/api/terminal/ws"
+            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/api/terminal/ws"
 
     await websocket.accept()
 

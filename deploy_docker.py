@@ -537,10 +537,12 @@ def main():
                 'docker ps -a --filter "name=openclaw-user-" -q',
                 shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
             )
-            container_ids = result.stdout.strip()
+            container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             if container_ids:
-                run(f"docker rm -f openclaw-user-{container_ids}", check=False)
+                run(["docker", "rm", "-f", *container_ids], check=False)
                 success("旧用户容器已清理")
+            else:
+                log("没有旧用户容器需要清理")
 
         # 设置 VITE_API_URL（frontend 构建需要）
         if args.host and args.gateway_port:

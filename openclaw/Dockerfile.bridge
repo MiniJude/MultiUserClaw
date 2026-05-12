@@ -2,6 +2,9 @@
 
 FROM node:22-slim AS bridge-base
 
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG BUNDLED_RUNTIME_DEPS_REGISTRY=https://registry.npmjs.org
+
 # 1) Bootstrap CA certs via HTTP mirror first
 RUN --mount=type=cache,id=openclaw-bridge-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=openclaw-bridge-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -14,8 +17,17 @@ RUN --mount=type=cache,id=openclaw-bridge-apt-cache,target=/var/cache/apt,sharin
 # 2) Switch to HTTPS mirror after certs are available
 RUN sed -i 's|http://mirrors.aliyun.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
 
-# 3) Use domestic npm mirror
-RUN npm config set registry https://registry.npmmirror.com
+# 3) Use the selected npm registry. Keep this configurable because npmjs and
+# mirrors can both have bad days in local Docker builds.
+RUN npm config set registry ${NPM_REGISTRY} && \
+    npm config set fetch-retries 10 && \
+    npm config set fetch-timeout 300000 && \
+    npm config set fetch-retry-maxtimeout 300000 && \
+    npm config get registry
+ENV npm_config_registry=${NPM_REGISTRY}
+ENV npm_config_fetch_retries=10
+ENV npm_config_fetch_timeout=300000
+ENV npm_config_fetch_retry_maxtimeout=300000
 
 # 4) Install system dependencies
 RUN --mount=type=cache,id=openclaw-bridge-apt-cache,target=/var/cache/apt,sharing=locked \
@@ -93,6 +105,7 @@ ENV OPENCLAW_SKIP_PROVIDERS=1
 ENV OPENCLAW_SKIP_CRON=1
 ENV OPENCLAW_LOAD_SHELL_ENV=0
 ENV OPENCLAW_SKIP_BROWSER_CONTROL_SERVER=1
+ENV OPENCLAW_BUNDLED_RUNTIME_DEPS_REGISTRY=${BUNDLED_RUNTIME_DEPS_REGISTRY}
 
 WORKDIR /app
 
@@ -104,11 +117,15 @@ COPY .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY patches/ ./patches/
 COPY scripts/postinstall-bundled-plugins.mjs scripts/npm-runner.mjs scripts/windows-cmd-helpers.mjs ./scripts/
 
-RUN pnpm config set registry https://registry.npmmirror.com && \
-    pnpm config set fetch-retries 5 && \
-    pnpm config set fetch-timeout 120000 && \
+ARG NPM_REGISTRY=https://registry.npmjs.org
+RUN pnpm config set registry ${NPM_REGISTRY} && \
+    pnpm config set fetch-retries 10 && \
+    pnpm config set fetch-timeout 300000 && \
+    pnpm config set network-timeout 300000 && \
+    pnpm config set network-concurrency 4 && \
     pnpm config set @tloncorp:registry https://registry.npmjs.org && \
     pnpm config get registry && \
+    pnpm config get network-concurrency && \
     pnpm config get @tloncorp:registry
 
 # Pre-fetch external packages into the shared pnpm store so source-only changes
@@ -118,6 +135,7 @@ RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/p
 
 FROM bridge-base AS bridge-build
 WORKDIR /app
+ARG NPM_REGISTRY=https://registry.npmjs.org
 
 # Reuse the warmed pnpm store from bridge-deps, then install against the full workspace.
 COPY --from=bridge-deps /app/.npmrc /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml ./
@@ -130,6 +148,15 @@ ENV PATH="/app/node_modules/.bin:$PATH"
 # Let all plugins resolve root dependencies (for example @sinclair/typebox)
 ENV NODE_PATH="/app/node_modules"
 
+RUN pnpm config set registry ${NPM_REGISTRY} && \
+    pnpm config set fetch-retries 10 && \
+    pnpm config set fetch-timeout 300000 && \
+    pnpm config set network-timeout 300000 && \
+    pnpm config set network-concurrency 4 && \
+    pnpm config set @tloncorp:registry https://registry.npmjs.org && \
+    pnpm config get registry && \
+    pnpm config get network-concurrency
+
 RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile --reporter=append-only
 
@@ -140,6 +167,12 @@ RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/p
 RUN rm -rf /app/dist && \
     find /app/extensions -mindepth 2 -maxdepth 2 -type d \( -name dist -o -name build \) -prune -exec rm -rf {} +
 RUN pnpm build
+
+# The Docker image already carries the full workspace node_modules. Bundled
+# runtime plugins otherwise try to stage their own deps on first chat, which
+# can block user provisioning on registry network timeouts.
+RUN find /app/dist-runtime/extensions -mindepth 1 -maxdepth 1 -type d \
+      -exec ln -sfn /app/node_modules {}/node_modules \;
 
 # Install openclaw command to /usr/local/bin/openclaw
 RUN --mount=type=cache,id=openclaw-bridge-npm-cache,target=/root/.npm,sharing=locked \

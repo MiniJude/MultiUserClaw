@@ -11,13 +11,20 @@ export interface TokenResponse {
   access_token: string
   refresh_token: string
   token_type: string
+  user_id?: string
+  username?: string
+  role?: string
 }
 
 export interface AuthUser {
   id: string
   username: string
   email: string
-  created_at: string
+  role?: string
+  quota_tier?: string
+  runtime_mode?: string
+  is_active?: boolean
+  created_at?: string
 }
 
 export interface AgentInfo {
@@ -42,6 +49,35 @@ export interface AgentListResult {
   mainKey: string
   scope: string
   agents: AgentInfo[]
+}
+
+export type ProvisioningState = 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
+
+export interface ProvisioningStageMeta {
+  key: string
+  label: string
+  progress: number
+}
+
+export interface ProvisioningDebugInfo {
+  error?: string | null
+  traceback?: string | null
+}
+
+export interface ProvisioningStatus {
+  status: ProvisioningState
+  stage: string
+  progress: number
+  message?: string | null
+  public_error?: string | null
+  attempts?: number
+  details?: unknown
+  created_at?: string | null
+  updated_at?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  stages?: ProvisioningStageMeta[]
+  debug?: ProvisioningDebugInfo
 }
 
 let agentsCache: AgentListResult | null = null
@@ -534,6 +570,16 @@ export function logout(): void {
 
 export async function getMe(): Promise<AuthUser> {
   return fetchJSON<AuthUser>('/api/auth/me')
+}
+
+export async function getProvisioningStatus(): Promise<ProvisioningStatus> {
+  return fetchJSON<ProvisioningStatus>('/api/provisioning/me')
+}
+
+export async function retryProvisioning(): Promise<ProvisioningStatus> {
+  return fetchJSON<ProvisioningStatus>('/api/provisioning/me/retry', {
+    method: 'POST',
+  })
 }
 
 // ---------------------------------------------------------------------------

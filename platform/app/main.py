@@ -13,7 +13,7 @@ from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
 from app.logging_setup import setup_logging, log_settings_summary
-from app.routes import auth, llm, proxy, admin, shared_openclaw, openviking, fast_chat
+from app.routes import auth, llm, proxy, admin, shared_openclaw, openviking, fast_chat, provisioning
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -167,6 +167,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(llm.router)
 app.include_router(fast_chat.router)
+app.include_router(provisioning.router)
 app.include_router(proxy.router)
 # 对于共享openclaw的路由api注册
 app.include_router(shared_openclaw.router)

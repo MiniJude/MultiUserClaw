@@ -45,6 +45,7 @@ export function createBundledRuntimeDepsInstallArgs(): string[] {
 }
 
 function createBundledRuntimeDepsPnpmInstallArgs(params: { storeDir: string }): string[] {
+  const registry = process.env.OPENCLAW_BUNDLED_RUNTIME_DEPS_REGISTRY?.trim();
   return [
     "install",
     "--prod",
@@ -52,6 +53,11 @@ function createBundledRuntimeDepsPnpmInstallArgs(params: { storeDir: string }): 
     "--ignore-workspace",
     "--config.frozen-lockfile=false",
     "--config.minimum-release-age=0",
+    "--config.minimumReleaseAge=0",
+    "--config.fetch-retries=10",
+    "--config.fetch-timeout=300000",
+    "--config.network-timeout=300000",
+    ...(registry ? [`--config.registry=${registry}`] : []),
     `--config.store-dir=${params.storeDir}`,
     "--config.node-linker=hoisted",
     "--config.virtual-store-dir=.pnpm",

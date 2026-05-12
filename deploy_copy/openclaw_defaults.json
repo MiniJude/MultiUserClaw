@@ -16,7 +16,7 @@
         "runTimeoutSeconds": 1800
       },
       "memorySearch": {
-        "enabled": true,
+        "enabled": false,
         "sources": ["memory"],
         "extraPaths": ["knowledge"],
         "sync": {
@@ -136,7 +136,7 @@
   },
 
   "browser": {
-    "enabled": true,
+    "enabled": false,
     "executablePath": "/usr/bin/chromium",
     "noSandbox": true,
     "extraArgs": [
@@ -147,24 +147,10 @@
   },
 
   "plugins": {
-    "enabled": true,
-    "allow": ["searxng", "memory-core"],
-    "slots": {
-      "memory": "memory-core"
-    },
-    "entries": {
-      "memory-core": {
-        "enabled": true
-      },
-      "searxng": {
-        "enabled": true,
-        "config": {
-          "webSearch": {
-            "baseUrl": "https://ai.infox-med.com:48888"
-          }
-        }
-      }
-    }
+    "enabled": false,
+    "allow": [],
+    "slots": {},
+    "entries": {}
   },
 
   "memory": {

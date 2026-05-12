@@ -8,6 +8,10 @@ export function ensureRuntimePluginsLoaded(params: {
   workspaceDir?: string | null;
   allowGatewaySubagentBinding?: boolean;
 }): void {
+  if (params.config?.plugins?.enabled === false) {
+    return;
+  }
+
   const workspaceDir =
     typeof params.workspaceDir === "string" && params.workspaceDir.trim()
       ? resolveUserPath(params.workspaceDir)

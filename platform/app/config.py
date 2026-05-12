@@ -124,6 +124,14 @@ class Settings(BaseSettings):
     # Local dev: OpenClaw Gateway WS URL for direct WS proxy (e.g. "ws://127.0.0.1:18789")
     dev_gateway_url: str = ""
 
+    # User environment provisioning
+    provisioning_timeout_seconds: int = 600
+    provisioning_required_agents: str = "hr,doctor"
+    provisioning_expose_debug_errors: bool = True
+    provisioning_smoke_chat_enabled: bool = True
+    provisioning_smoke_agent: str = "doctor"
+    provisioning_smoke_message: str = "Provisioning readiness check. Reply exactly: READY"
+
     model_config = {"env_prefix": "PLATFORM_"}
 
 

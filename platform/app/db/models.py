@@ -59,6 +59,28 @@ class Container(Base):
     last_active_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ProvisioningStatus(Base):
+    """Per-user environment provisioning progress."""
+
+    __tablename__ = "provisioning_statuses"
+
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # Status: pending | running | ready | failed | skipped
+    stage: Mapped[str] = mapped_column(String(64), nullable=False, default="registered")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    public_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    debug_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    debug_traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class UserPortBinding(Base):
     """Per-user persisted host port preferences for recreated containers."""
 

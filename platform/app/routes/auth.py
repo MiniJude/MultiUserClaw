@@ -24,6 +24,7 @@ from app.audit import write_audit_log
 from app.auth.dependencies import get_current_user
 from app.db.engine import get_db
 from app.db.models import User
+from app.provisioning import request_user_provisioning
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -72,7 +73,11 @@ class UserResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    req: RegisterRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     if await get_user_by_username(db, req.username):
         raise HTTPException(status_code=400, detail="账号已存在")
     if await get_user_by_email(db, req.email):
@@ -83,6 +88,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="runtime_mode must be dedicated or shared")
 
     user = await create_user(db, req.username, req.email, req.password, runtime_mode=runtime_mode)
+    await request_user_provisioning(db, user, background_tasks)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),
@@ -125,6 +131,7 @@ async def login(
     )
     if settings.user_openviking_enabled and user.runtime_mode == "dedicated":
         background_tasks.add_task(_ensure_openviking_sidecar, user.id)
+    await request_user_provisioning(db, user, background_tasks)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),

@@ -58,6 +58,19 @@ def _published_binding(container: docker.models.containers.Container, container_
     return host_ip, host_port
 
 
+def _should_use_host_api_binding() -> bool:
+    """Prefer published localhost API ports when the platform runs outside Docker."""
+    return settings.user_container_api_via_host or not Path("/.dockerenv").exists()
+
+
+def _host_api_endpoint(container: docker.models.containers.Container) -> tuple[str, int] | None:
+    host_ip, host_port = _published_binding(container, "18080/tcp")
+    if not host_port:
+        return None
+    host = "127.0.0.1" if host_ip in {"", "0.0.0.0", "::"} else host_ip
+    return host, int(host_port)
+
+
 def _is_host_port_in_use(client: docker.DockerClient, host_port: int) -> bool:
     """Return True if any container currently publishes the given host port."""
     port_str = str(host_port)
@@ -86,7 +99,7 @@ def _user_container_proxy_url() -> str:
     configured = settings.container_proxy_url.strip()
     if configured:
         return configured
-    if settings.user_container_api_via_host:
+    if _should_use_host_api_binding():
         return f"http://host.docker.internal:{settings.port}/llm/v1"
     return "http://gateway:8080/llm/v1"
 
@@ -367,6 +380,7 @@ def _install_openviking_plugin(container: docker.models.containers.Container) ->
     if not settings.user_openviking_enabled or not settings.user_openviking_install_plugin:
         return False
 
+    timeout_seconds = max(30, settings.user_openviking_plugin_timeout_ms // 1000)
     force_flag = (
         " --dangerously-force-unsafe-install"
         if settings.user_openviking_force_unsafe_plugin_install
@@ -374,7 +388,8 @@ def _install_openviking_plugin(container: docker.models.containers.Container) ->
     )
     command = (
         "test -d /root/.openclaw/extensions/openviking "
-        f"|| node /app/openclaw.mjs plugins install{force_flag} clawhub:@openclaw/openviking"
+        f"|| timeout {timeout_seconds}s "
+        f"node /app/openclaw.mjs plugins install{force_flag} clawhub:@openclaw/openviking"
     )
     exit_code, output = container.exec_run(
         cmd=["sh", "-lc", command],
@@ -539,35 +554,24 @@ def _build_expose_port_skill_markdown(
 
 def _write_expose_port_skill(container: docker.models.containers.Container, markdown: str) -> None:
     """Write /root/.openclaw/workspace/skills/container-expose-info/SKILL.md via put_archive."""
+    target_dir = "/root/.openclaw/workspace/skills/container-expose-info"
+    mkdir_result = container.exec_run(["sh", "-lc", f"mkdir -p {target_dir}"])
+    if getattr(mkdir_result, "exit_code", 1) != 0:
+        output = getattr(mkdir_result, "output", b"")
+        detail = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
+        raise RuntimeError(f"failed to prepare container-expose-info directory: {detail}")
+
     content = markdown.encode("utf-8")
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
-        workspace_dir = tarfile.TarInfo(name="workspace")
-        workspace_dir.type = tarfile.DIRTYPE
-        workspace_dir.mode = 0o755
-        workspace_dir.mtime = int(time.time())
-        tar.addfile(workspace_dir)
-
-        skills_dir = tarfile.TarInfo(name="workspace/skills")
-        skills_dir.type = tarfile.DIRTYPE
-        skills_dir.mode = 0o755
-        skills_dir.mtime = int(time.time())
-        tar.addfile(skills_dir)
-
-        skill_subdir = tarfile.TarInfo(name="workspace/skills/container-expose-info")
-        skill_subdir.type = tarfile.DIRTYPE
-        skill_subdir.mode = 0o755
-        skill_subdir.mtime = int(time.time())
-        tar.addfile(skill_subdir)
-
-        skill_file = tarfile.TarInfo(name="workspace/skills/container-expose-info/SKILL.md")
+        skill_file = tarfile.TarInfo(name="SKILL.md")
         skill_file.size = len(content)
         skill_file.mode = 0o644
         skill_file.mtime = int(time.time())
         tar.addfile(skill_file, io.BytesIO(content))
 
     tar_buffer.seek(0)
-    ok = container.put_archive("/root/.openclaw", tar_buffer.read())
+    ok = container.put_archive(target_dir, tar_buffer.read())
     if not ok:
         raise RuntimeError("failed to write container-expose-info SKILL.md into container")
 
@@ -724,6 +728,8 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     if extra_hosts:
         run_kwargs["extra_hosts"] = extra_hosts
 
+    use_host_api_binding = _should_use_host_api_binding()
+
     if settings.user_container_publish_ports:
         binding = await get_user_port_binding(db, user_id)
         preferred_browser_port = binding.host_port_browser if binding is not None else None
@@ -742,15 +748,19 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
                 "5900/tcp": (settings.user_container_bind_ip, preferred_browser_port),
                 "30000/tcp": (settings.user_container_bind_ip, preferred_service_port),
             }
-            if settings.user_container_api_via_host:
+            if use_host_api_binding:
                 run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
         else:
             run_kwargs["ports"] = {
                 "5900/tcp": (settings.user_container_bind_ip, None),
                 "30000/tcp": (settings.user_container_bind_ip, None),
             }
-            if settings.user_container_api_via_host:
+            if use_host_api_binding:
                 run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
+    elif use_host_api_binding:
+        run_kwargs["ports"] = {
+            "18080/tcp": ("127.0.0.1", None),
+        }
 
     try:
         docker_container = client.containers.run(**run_kwargs)
@@ -761,7 +771,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
                 "5900/tcp": (settings.user_container_bind_ip, None),
                 "30000/tcp": (settings.user_container_bind_ip, None),
             }
-            if settings.user_container_api_via_host:
+            if use_host_api_binding:
                 run_kwargs["ports"]["18080/tcp"] = ("127.0.0.1", None)
             docker_container = client.containers.run(**run_kwargs)
         else:
@@ -776,7 +786,6 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
 
     # Read container IP on the internal network
     docker_container.reload()
-    api_binding = _published_binding(docker_container, "18080/tcp")
     browser_binding = _published_binding(docker_container, "5900/tcp")
     service_binding = _published_binding(docker_container, "30000/tcp")
     expose_markdown = _build_expose_port_skill_markdown(
@@ -797,9 +806,10 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
 
     record.docker_id = docker_container.id
     record.status = "running"
-    if settings.user_container_api_via_host and api_binding[1]:
-        record.internal_host = "127.0.0.1"
-        record.internal_port = int(api_binding[1])
+    host_api_endpoint = _host_api_endpoint(docker_container) if use_host_api_binding else None
+    if host_api_endpoint is not None:
+        record.internal_host = host_api_endpoint[0]
+        record.internal_port = host_api_endpoint[1]
     else:
         record.internal_host = internal_ip
         record.internal_port = 18080
@@ -915,18 +925,18 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
                         c.restart(timeout=10)
                         c.reload()
             # Sync internal IP — it may change after container restart
-            if settings.user_container_api_via_host:
-                api_binding = _published_binding(c, "18080/tcp")
-                if not api_binding[1]:
+            if _should_use_host_api_binding():
+                host_api_endpoint = _host_api_endpoint(c)
+                if host_api_endpoint is None:
                     return await _recreate_container_record(db, record, c)
-                api_port = int(api_binding[1])
-                if record.internal_host != "127.0.0.1" or record.internal_port != api_port:
-                    record.internal_host = "127.0.0.1"
+                api_host, api_port = host_api_endpoint
+                if record.internal_host != api_host or record.internal_port != api_port:
+                    record.internal_host = api_host
                     record.internal_port = api_port
                     await db.execute(
                         update(Container)
                         .where(Container.id == record.id)
-                        .values(internal_host="127.0.0.1", internal_port=api_port)
+                        .values(internal_host=api_host, internal_port=api_port)
                     )
                     await db.commit()
             else:

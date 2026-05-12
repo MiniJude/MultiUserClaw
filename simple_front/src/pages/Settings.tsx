@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Bot,
+  BookOpen,
   Check,
   ChevronDown,
   ChevronRight,
@@ -11,9 +12,11 @@ import {
   Trash2,
 } from 'lucide-react'
 import AgentCreatePanel from '../components/AgentCreatePanel.tsx'
+import MarkdownContent from '../components/MarkdownContent.tsx'
 import IconButton from '../components/ui/IconButton.tsx'
 import Popconfirm from '../components/ui/Popconfirm.tsx'
 import { useToast } from '../components/ui/Toast.tsx'
+import operationManual from '../content/operationManual.md?raw'
 import {
   DEFAULT_APPEARANCE,
   readAppearanceSettings,
@@ -33,6 +36,7 @@ import {
 const tabs = [
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'agents', label: 'Agents', icon: Bot },
+  { id: 'manual', label: '操作手册', icon: BookOpen },
 ] as const
 
 const accentOptions = [
@@ -383,6 +387,20 @@ function AppearancePreview({ settings }: { settings: AppearanceSettings }) {
   )
 }
 
+function ManualSettings() {
+  return (
+    <section className="mt-8 overflow-hidden rounded-xl border border-light-border bg-light-card">
+      <div className="border-b border-light-border px-5 py-4">
+        <div className="text-sm font-semibold text-light-text">用户操作说明</div>
+        <div className="mt-1 text-xs text-light-text-secondary">面向日常使用的功能说明和操作建议</div>
+      </div>
+      <div className="px-5 py-5 text-light-text">
+        <MarkdownContent content={operationManual} />
+      </div>
+    </section>
+  )
+}
+
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]['id']>('appearance')
   const [settings, setSettings] = useState<AppearanceSettings>(() => readAppearanceSettings())
@@ -542,8 +560,10 @@ export default function Settings() {
                   恢复默认外观
                 </button>
               </div>
-            ) : (
+            ) : activeTab === 'agents' ? (
               <AgentsSettings />
+            ) : (
+              <ManualSettings />
             )}
           </div>
         </main>

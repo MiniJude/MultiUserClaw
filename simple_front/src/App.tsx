@@ -10,6 +10,7 @@ import SkillStore from './pages/SkillStore.tsx'
 import OpenViking from './pages/OpenViking.tsx'
 import { isLoggedIn } from './lib/api.ts'
 import { ToastProvider } from './components/ui/Toast.tsx'
+import ProvisioningGate from './components/ProvisioningGate.tsx'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   if (!isLoggedIn()) return <Navigate to="/login" replace />
@@ -21,7 +22,7 @@ export default function App() {
     <ToastProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
+        <Route path="/" element={<RequireAuth><ProvisioningGate><Layout /></ProvisioningGate></RequireAuth>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="dashboard/knowledge" element={<Navigate to="/knowledge" replace />} />
